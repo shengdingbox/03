@@ -15,7 +15,18 @@ logger = logging.getLogger(__name__)
 
 # 常见代理软件进程名（小写匹配）
 _PROXY_PROCESSES = [
-    "",
+    "clash", "clashx", "clash-verge", "clash for windows",
+    "v2ray", "v2rayn", "v2rayng", "v2ray-u",
+    "shadowsocks", "ss-local", "ssr-local", "ssr-windows",
+    "surge", "surge mac",
+    "quantumult", "quantumult x",
+    "trojan", "trojan-go",
+    "naive", "naiveproxy",
+    "hysteria", "tuic",
+    "sing-box",
+    "mihomo",
+    "wireguard",
+    "tun2socks",
 ]
 
 # 常见 Hook/抓包工具进程名

@@ -1258,7 +1258,12 @@ class ProxyDatabase:
         self._sub_key_version = 0  # 子 Key 变更版本号，每次增删改 +1，ProxyRouter 据此刷新认证缓存
 
     def _load(self) -> dict:
-        """从文件加载数据（带重试，读取失败时重试而非返回空数据）"""
+        """从文件加载数据（带重试，读取失败时重试而非返回空数据）
+
+        兼容两种历史格式：
+        - 纯 Base64 文本（当前版本写入）
+        - 早期版本的二进制 XXTEA 密文（首字节非 ASCII）
+        """
         import os
         if not os.path.exists(self._db_path):
             return {
@@ -1271,15 +1276,26 @@ class ProxyDatabase:
         # 最多重试 3 次，应对并发写入导致的短暂读取失败
         for attempt in range(3):
             try:
-                with open(self._db_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    if not content.strip():
-                        # 文件为空（可能正在被原子写入），等一下重试
-                        import time
-                        time.sleep(0.2 * (attempt + 1))
-                        continue
-                    # 解密并反序列化（兼容旧版明文 JSON）
-                    return _decrypt_json(content)
+                # 用二进制模式读取，避免对非 ASCII 字节解码失败
+                # （兼容早期版本直接写入二进制密文的格式）
+                with open(self._db_path, "rb") as f:
+                    raw_bytes = f.read()
+                if not raw_bytes.strip():
+                    # 文件为空（可能正在被原子写入），等一下重试
+                    import time
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                # 优先按文本 Base64 解析（当前格式）
+                try:
+                    text = raw_bytes.decode("ascii").strip()
+                    return _decrypt_json(text)
+                except (UnicodeDecodeError, ValueError):
+                    # 不是合法 Base64 文本，尝试直接当作二进制 XXTEA 密文解密
+                    # （兼容早期版本直接写入 _xxtea_encrypt_bytes 输出的格式）
+                    decrypted = _xxtea_decrypt_bytes(raw_bytes, _XXTEA_KEY)
+                    orig_len = int.from_bytes(decrypted[:4], 'little')
+                    raw = decrypted[4:4 + orig_len]
+                    return json.loads(raw.decode("utf-8"))
             except (json.JSONDecodeError, ValueError) as e:
                 # JSON 解析失败（可能读到半截文件），等一下重试
                 logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
@@ -1291,6 +1307,14 @@ class ProxyDatabase:
                 time.sleep(0.3 * (attempt + 1))
         # 重试 3 次都失败，说明文件确实损坏
         logger.error("[DB] proxy_db.db 读取失败3次，返回空数据（可能需要恢复备份）")
+        # 自动备份损坏的文件，便于后续排查/恢复
+        try:
+            import time as _t
+            backup_path = f"{self._db_path}.corrupt.{int(_t.time())}"
+            os.replace(self._db_path, backup_path)
+            logger.warning(f"[DB] 已将损坏的 proxy_db.db 备份到: {backup_path}")
+        except Exception as backup_err:
+            logger.debug(f"[DB] 备份损坏文件失败: {backup_err}")
         return {
             "upstream_keys": [],
             "sub_api_keys": [],

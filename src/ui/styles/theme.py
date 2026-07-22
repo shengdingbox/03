@@ -81,13 +81,22 @@ def get_stylesheet(theme: str = "system") -> str:
 
     colors = DARK_THEME if theme == "dark" else LIGHT_THEME
 
+    # 跨平台字体：macOS 用 PingFang SC，Windows 用 Microsoft YaHei，Linux 兜底
+    import platform
+    if platform.system() == "Darwin":
+        font_family = '"PingFang SC", "Helvetica Neue", sans-serif'
+    elif platform.system() == "Linux":
+        font_family = '"Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif'
+    else:
+        font_family = '"Microsoft YaHei", "Segoe UI", sans-serif'
+
     return f"""
         /* === 全局样式 === */
         QMainWindow {{
             background-color: {colors['bg_primary']};
         }}
         QWidget {{
-            font-family: "Microsoft YaHei", "Segoe UI", "PingFang SC", sans-serif;
+            font-family: {font_family};
             font-size: 13px;
             color: {colors['text_primary']};
         }}

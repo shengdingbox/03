@@ -6,16 +6,22 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "cryptography==48.0.0",
+    "nuitka==2.7.12",
     "pyinstaller==6.20.0",
     "pyside6==6.11.1",
     "pyside6-addons==6.11.1",
     "pyside6-essentials==6.11.1",
+    "pysocks>=1.7.1",
     "requests==2.34.2",
+    "charset_normalizer>=3.3.0",
+    "urllib3>=2.0.0",
+    "certifi>=2024.0.0",
+    "idna>=3.4.0",
 ]
-
-[[tool.uv.index]]
-url = "https://mirrors.aliyun.com/pypi/simple"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
