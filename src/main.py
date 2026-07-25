@@ -248,8 +248,8 @@ def main():
         env_result = check_environment()
         env_text = format_env_warnings(env_result)
         if env_text:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(_main_window, "环境检测", env_text)
+            logger.info(f"[环境检测] {env_text}")
+            # 弹窗已关闭，检测结果只记录到日志
     except Exception as e:
         logger.warning(f"环境检测失败: {e}")
 

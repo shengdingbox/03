@@ -75,10 +75,10 @@ jobs:
 
   build-macos-intel:
     if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-15-intel
+    runs-on: macos-13
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MACOSX_DEPLOYMENT_TARGET: "13"
+      MACOSX_DEPLOYMENT_TARGET: "12"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,10 +132,10 @@ jobs:
 
   build-macos-arm:
     if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-15
+    runs-on: macos-14
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MACOSX_DEPLOYMENT_TARGET: "13"
+      MACOSX_DEPLOYMENT_TARGET: "12"
     steps:
       - uses: actions/checkout@v4
         with:

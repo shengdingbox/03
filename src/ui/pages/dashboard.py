@@ -870,6 +870,17 @@ class DashboardPage(QWidget):
             except Exception:
                 pass
             self._render_credits(result)
+
+            # 余额 > 10 且服务未运行时，自动启动服务
+            try:
+                balance = float(result.get("credits", 0))
+            except (TypeError, ValueError):
+                balance = 0.0
+
+            if balance > 10 and self._proxy_page:
+                ps = self._proxy_page._proxy_server
+                if not (ps and ps.is_running):
+                    self._toggle_proxy_service()
         else:
             err = result.get("error", "无响应") if result else "无响应"
             self._quota_value_label.setText("--")
@@ -943,6 +954,71 @@ class DashboardPage(QWidget):
                 "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
                 "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
             )
+
+    def _show_loading_dialog(self, text: str = "正在启动服务..."):
+        """创建并显示加载弹窗（带旋转动画）"""
+        self._loading_dialog = QDialog(self)
+        self._loading_dialog.setWindowTitle("请稍候")
+        self._loading_dialog.setModal(True)
+        self._loading_dialog.setMinimumWidth(320)
+        self._loading_dialog.setWindowFlags(
+            self._loading_dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(self._loading_dialog)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # 旋转加载图标
+        from PySide6.QtCore import QPropertyAnimation, QByteArray
+        self._loading_spinner = QLabel("◐")
+        self._loading_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_spinner.setStyleSheet(f"font-size: 36px; color: {self._colors['accent']};")
+        layout.addWidget(self._loading_spinner)
+
+        # 旋转动画
+        self._loading_anim = QPropertyAnimation(
+            self._loading_spinner, QByteArray(b"rotation")
+        )
+        # QLabel 没有 rotation 属性，用定时器旋转文字替代
+        from PySide6.QtCore import QTimer
+        self._loading_chars = ["◐", "◓", "◑", "◒"]
+        self._loading_idx = 0
+        self._loading_timer = QTimer()
+        self._loading_timer.timeout.connect(self._rotate_loading)
+        self._loading_timer.start(150)
+
+        # 提示文字
+        self._loading_label = QLabel(text)
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 500; color: {self._colors['text_primary']};"
+        )
+        layout.addWidget(self._loading_label)
+
+        self._loading_dialog.show()
+
+    def _rotate_loading(self):
+        """旋转加载图标"""
+        self._loading_idx = (self._loading_idx + 1) % len(self._loading_chars)
+        self._loading_spinner.setText(self._loading_chars[self._loading_idx])
+
+    def _update_loading_text(self, text: str):
+        """更新加载弹窗提示文字"""
+        if hasattr(self, '_loading_label') and self._loading_label:
+            self._loading_label.setText(text)
+
+    def _close_loading_dialog(self):
+        """关闭加载弹窗"""
+        if hasattr(self, '_loading_timer') and self._loading_timer:
+            self._loading_timer.stop()
+        if hasattr(self, '_loading_dialog') and self._loading_dialog:
+            self._loading_dialog.close()
+            self._loading_dialog.deleteLater()
+            self._loading_dialog = None
+            self._loading_label = None
+            self._loading_spinner = None
 
     def _show_diag_dialog(self, port: int):
         """创建并显示诊断弹窗"""
@@ -1026,16 +1102,99 @@ class DashboardPage(QWidget):
         except Exception:
             pass
 
-        # 服务未运行 → 显示诊断弹窗
+        # 自动同步配置到所选客户端（根据勾选）
+        self._auto_sync_config_before_start()
+
+        # 显示加载弹窗
         port = self._port_spin.value()
-        self._show_diag_dialog(port)
+        self._show_loading_dialog("正在启动服务...")
         self._toggle_proxy_btn.setEnabled(False)
         self._proxy_status_label.setText("⏳ 正在启动...")
         self._proxy_status_label.setStyleSheet("font-weight: 600; color: #D69E2E;")
 
-        # 启动诊断动画
+        # 直接获取 BuddyKey（不再走诊断动画）
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(200, lambda: self._run_diag_animation(port))
+        QTimer.singleShot(300, lambda: self._fetch_buddykey())
+
+    def _auto_sync_config_before_start(self):
+        """启动服务前自动同步配置到所选客户端（根据勾选）
+
+        与 _apply_config 类似，但不弹确认窗、不弹成功提示，
+        只在后台静默写入 models.json + 配置调试端口。
+        """
+        self._save_client_config()
+        if not self._proxy_page:
+            return
+
+        from pathlib import Path
+        import os
+        from datetime import datetime
+        from shutil import copy2
+
+        # 检查是否有勾选目标
+        targets = []
+        if self._chk_workbuddy.isChecked():
+            targets.append(("WorkBuddy", Path.home() / ".workbuddy"))
+        if self._chk_codebuddy.isChecked():
+            targets.append(("CodeBuddy", Path.home() / ".codebuddy"))
+
+        if not targets:
+            return
+
+        # 生成配置 JSON
+        try:
+            config_json = self._build_config_json()
+        except Exception as e:
+            logger.warning(f"启动服务时生成配置 JSON 失败: {e}")
+            return
+
+        # 自动备份
+        if self._chk_auto_backup.isChecked():
+            backup_root = Path.home() / ".buddy-tool" / "config_backups"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for name, target_dir in targets:
+                src = target_dir / "models.json"
+                if src.exists():
+                    dst = backup_root / f"{name.lower()}_{ts}.json"
+                    try:
+                        copy2(str(src), str(dst))
+                    except Exception as e:
+                        logger.warning(f"备份 {name} 配置失败: {e}")
+
+        # 写入配置
+        for name, target_dir in targets:
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / "models.json"
+                target_path.write_text(config_json, encoding="utf-8")
+                logger.info(f"启动服务: 已同步配置到 {name}")
+            except Exception as e:
+                logger.warning(f"启动服务: 同步配置到 {name} 失败: {e}")
+
+        # 如果勾选了 WorkBuddy，后台配置调试端口并重启（静默，不弹窗）
+        if self._chk_workbuddy.isChecked():
+            from PySide6.QtCore import QThread, Signal as QSignal
+
+            class _SilentWorkbuddySetupThread(QThread):
+                done = QSignal(bool, str)
+
+                def run(self):
+                    try:
+                        from ...utils.setup_debug_port import setup_and_restart
+                        ok, msg = setup_and_restart()
+                        self.done.emit(ok, msg)
+                    except Exception as e:
+                        self.done.emit(False, str(e))
+
+            self._silent_workbuddy_thread = _SilentWorkbuddySetupThread()
+            self._silent_workbuddy_thread.done.connect(
+                lambda ok, msg: logger.info(f"启动服务: WorkBuddy 配置 {'成功' if ok else '失败'} - {msg}")
+            )
+            self._silent_workbuddy_thread.finished.connect(
+                lambda: setattr(self, '_silent_workbuddy_thread', None)
+            )
+            self._silent_workbuddy_thread.start()
 
     def _fetch_buddykey(self):
         """后台请求 BuddyKey"""
@@ -1061,28 +1220,41 @@ class DashboardPage(QWidget):
         """获取 BuddyKey 完成"""
         if not result or not result.get("success"):
             err = (result or {}).get("error") or (result or {}).get("message") or "未知错误"
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", f"无法获取激活码：{err}")
             return
 
         buddy_key = result.get("buddyKey", "")
         if not buddy_key:
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", "服务端未返回激活码")
+            return
+
+        # 检查余额，余额为 0 时拒绝启动
+        balance = result.get("balance", 0)
+        if balance is None:
+            balance = 0
+        try:
+            balance = float(balance)
+        except (TypeError, ValueError):
+            balance = 0.0
+
+        if balance <= 0:
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setEnabled(True)
+            self._close_loading_dialog()
+            QMessageBox.warning(self, "无法启动", f"账户余额为 0，请充值后再启动服务。")
             return
 
         # 在后台线程中处理 key 写入和服务启动，避免主线程阻塞
         from PySide6.QtCore import QThread, Signal as QSignal
-
-        balance = result.get("balance", 0)
 
         class StartServiceThread(QThread):
             done = QSignal(bool)
@@ -1127,11 +1299,10 @@ class DashboardPage(QWidget):
     def _on_service_started(self, success: bool):
         """服务启动完成回调（在主线程执行）"""
         if not success:
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", "服务启动过程中发生错误")
             return
 
@@ -1140,8 +1311,8 @@ class DashboardPage(QWidget):
         self._toggle_proxy_btn.setEnabled(True)
         self._sync_proxy_status()
 
-        # 关闭诊断弹窗
-        self._close_diag_dialog()
+        # 关闭加载弹窗
+        self._close_loading_dialog()
 
     def _apply_toggle_btn_style(self):
         """根据服务状态设置按钮内联样式"""
