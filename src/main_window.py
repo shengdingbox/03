@@ -257,14 +257,20 @@ class MainWindow(QMainWindow):
         self._updater.check_update()
 
     def _load_app_icon(self) -> QIcon:
-        """加载应用图标 — 优先 .ico 文件，降级为程序化生成"""
-        # 1. 尝试从打包路径加载
+        """加载应用图标 — macOS 用程序化生成高清图标，其他平台优先 .ico"""
+        # macOS 上 .ico 显示模糊，改用程序化生成高清图标
+        if sys.platform == "darwin":
+            icon = self._generate_high_res_icon()
+            self._set_dock_icon(icon)
+            return icon
+
+        # Windows / Linux: 优先加载 .ico
         icon_paths = []
         if getattr(sys, 'frozen', False):
-            # PyInstaller 打包模式
-            base = sys._MEIPASS
+            # PyInstaller / Nuitka 打包模式
+            base = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
             icon_paths.append(os.path.join(base, 'assets', 'icons', 'app.ico'))
-        # 2. 开发模式
+        # 开发模式
         src_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(src_dir)
         icon_paths.append(os.path.join(project_root, 'assets', 'icons', 'app.ico'))
@@ -276,24 +282,84 @@ class MainWindow(QMainWindow):
                     logger.info(f"加载应用图标: {icon_path}")
                     return icon
 
-        # 3. 降级：程序化生成闪电图标
-        logger.info("未找到 .ico 图标文件，使用程序化生成图标")
-        from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
-        from PySide6.QtCore import QRect
-        pixmap = QPixmap(64, 64)
+        # 降级：程序化生成闪电图标
+        return self._generate_high_res_icon()
+
+    def _generate_high_res_icon(self) -> QIcon:
+        """程序化生成高分辨率闪电图标（256x256）"""
+        logger.info("使用程序化生成图标")
+        from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QPen, QLinearGradient, QBrush
+        from PySide6.QtCore import QRect, QLineF
+
+        size = 256
+        pixmap = QPixmap(size, size)
         pixmap.fill(QColor(0, 0, 0, 0))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#6C5CE7"))
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        # 圆角矩形背景渐变
+        gradient = QLinearGradient(0, 0, 0, size)
+        gradient.setColorAt(0, QColor("#7C3AED"))
+        gradient.setColorAt(0.5, QColor("#6C5CE7"))
+        gradient.setColorAt(1, QColor("#5B4FE9"))
+        painter.setBrush(QBrush(gradient))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(2, 2, 60, 60)
-        painter.setPen(QColor("#FFFFFF"))
-        font = QFont("Segoe UI Emoji", 32)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(QRect(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "⚡")
+        painter.drawRoundedRect(8, 8, size - 16, size - 16, 56, 56)
+
+        # 内圆角边框
+        painter.setBrush(QColor(255, 255, 255, 15))
+        painter.drawRoundedRect(14, 14, size - 28, size - 28, 50, 50)
+
+        # 闪电图形
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        flash = [
+            (size * 0.58, size * 0.18),
+            (size * 0.30, size * 0.55),
+            (size * 0.46, size * 0.55),
+            (size * 0.38, size * 0.82),
+            (size * 0.70, size * 0.42),
+            (size * 0.52, size * 0.42),
+        ]
+        from PySide6.QtGui import QPolygonF
+        from PySide6.QtCore import QPointF
+        poly = QPolygonF([QPointF(x, y) for x, y in flash])
+        painter.drawPolygon(poly)
+
+        # 闪电阴影效果
+        painter.setBrush(QColor(255, 255, 255, 40))
+        shadow = [
+            (size * 0.58, size * 0.18),
+            (size * 0.55, size * 0.22),
+            (size * 0.50, size * 0.45),
+            (size * 0.52, size * 0.42),
+        ]
+        shadow_poly = QPolygonF([QPointF(x, y) for x, y in shadow])
+        painter.drawPolygon(shadow_poly)
+
         painter.end()
         return QIcon(pixmap)
+
+    def _set_dock_icon(self, icon: QIcon):
+        """macOS: 设置 Dock 图标"""
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import NSImage, NSApp
+            pixmap = icon.pixmap(256, 256)
+            if pixmap.isNull():
+                return
+            # QPixmap → NSImage
+            image = pixmap.toImage()
+            buf = image.bits().asstring(image.sizeInBytes())
+            ns_image = NSImage.alloc().initWithData_(
+                bytes(buf)
+            )
+            ns_image.setSize_((256, 256))
+            NSApp.setApplicationIconImage_(ns_image)
+        except Exception as e:
+            logger.debug(f"设置 Dock 图标失败: {e}")
 
     def _on_accounts_quota_updated(self):
         """账号页积分更新 → 从磁盘重新加载代理池数据并刷新
