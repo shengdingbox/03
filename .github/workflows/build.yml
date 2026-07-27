@@ -57,14 +57,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install UPX
-        uses: crazy-max/ghaction-upx@v3
-        with:
-          version: latest
-
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --windows-console-mode=disable --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -100,9 +95,6 @@ jobs:
         run: |
           arch -x86_64 python -m pip install --upgrade pip
           arch -x86_64 python -m pip install -r requirements.txt
-
-      - name: Install UPX
-        run: brew install upx
 
       - name: Install icon tools
         run: pip install Pillow
@@ -141,15 +133,71 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+
+      - name: Inspect dist output
+        run: |
+          echo "=== dist/ contents ==="
+          find dist -maxdepth 3 -type f -o -type d | head -50
+          echo "=== dist/ tree ==="
+          ls -laR dist | head -80
+
+      - name: Package app bundle
+        run: |
+          # Nuitka onefile + app bundle 的输出可能是 dist/BuddyTool.app 或 dist/BuddyTool
+          # 自动检测并打包
+          if [ -d "dist/BuddyTool.app" ]; then
+            echo "[INFO] Found BuddyTool.app bundle"
+            cd dist && zip -r -y BuddyTool-Intel.zip BuddyTool.app
+          elif [ -f "dist/BuddyTool" ]; then
+            echo "[INFO] Found standalone BuddyTool executable, wrapping into .app manually"
+            # 手动创建 .app bundle
+            mkdir -p "dist/BuddyTool.app/Contents/MacOS"
+            mkdir -p "dist/BuddyTool.app/Contents/Resources"
+            cp "dist/BuddyTool" "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+            # 创建 Info.plist
+            cat > "dist/BuddyTool.app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>BuddyTool</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.buddytool.app</string>
+              <key>CFBundleName</key>
+              <string>BuddyTool</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>12.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+            # 复制图标
+            if [ -f "assets/icons/icon.icns" ]; then
+              cp "assets/icons/icon.icns" "dist/BuddyTool.app/Contents/Resources/AppIcon.icns"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "dist/BuddyTool.app/Contents/Info.plist" 2>/dev/null || true
+            fi
+            chmod +x "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+            cd dist && zip -r -y BuddyTool-Intel.zip BuddyTool.app
+          else
+            echo "[ERROR] Neither BuddyTool.app nor BuddyTool found in dist/"
+            find dist -type f
+            exit 1
+          fi
 
       - name: Verify app architecture
         run: |
-          file "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
-
-      - name: Compress app bundle
-        run: |
-          cd dist && zip -r -y BuddyTool-Intel.zip BuddyTool.app
+          if [ -f "dist/BuddyTool.app/Contents/MacOS/BuddyTool" ]; then
+            file "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+          else
+            file "dist/BuddyTool"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -184,9 +232,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install UPX
-        run: brew install upx
-
       - name: Install icon tools
         run: pip install Pillow
 
@@ -216,17 +261,71 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+
+      - name: Inspect dist output
+        run: |
+          echo "=== dist/ contents ==="
+          find dist -maxdepth 3 -type f -o -type d | head -50
+          echo "=== dist/ tree ==="
+          ls -laR dist | head -80
+
+      - name: Package app bundle
+        run: |
+          # Nuitka onefile + app bundle 的输出可能是 dist/BuddyTool.app 或 dist/BuddyTool
+          # 自动检测并打包
+          if [ -d "dist/BuddyTool.app" ]; then
+            echo "[INFO] Found BuddyTool.app bundle"
+            cd dist && zip -r -y BuddyTool-ARM.zip BuddyTool.app
+          elif [ -f "dist/BuddyTool" ]; then
+            echo "[INFO] Found standalone BuddyTool executable, wrapping into .app manually"
+            # 手动创建 .app bundle
+            mkdir -p "dist/BuddyTool.app/Contents/MacOS"
+            mkdir -p "dist/BuddyTool.app/Contents/Resources"
+            cp "dist/BuddyTool" "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+            # 创建 Info.plist
+            cat > "dist/BuddyTool.app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>BuddyTool</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.buddytool.app</string>
+              <key>CFBundleName</key>
+              <string>BuddyTool</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>12.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+            # 复制图标
+            if [ -f "assets/icons/icon.icns" ]; then
+              cp "assets/icons/icon.icns" "dist/BuddyTool.app/Contents/Resources/AppIcon.icns"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "dist/BuddyTool.app/Contents/Info.plist" 2>/dev/null || true
+            fi
+            chmod +x "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+            cd dist && zip -r -y BuddyTool-ARM.zip BuddyTool.app
+          else
+            echo "[ERROR] Neither BuddyTool.app nor BuddyTool found in dist/"
+            find dist -type f
+            exit 1
+          fi
 
       - name: Verify ARM app architecture
         run: |
-          APP_EXE="dist/BuddyTool.app/Contents/MacOS/BuddyTool"
-          test -x "$APP_EXE"
-          file "$APP_EXE" | grep -q 'arm64'
-
-      - name: Compress app bundle
-        run: |
-          cd dist && zip -r -y BuddyTool-ARM.zip BuddyTool.app
+          if [ -f "dist/BuddyTool.app/Contents/MacOS/BuddyTool" ]; then
+            file "dist/BuddyTool.app/Contents/MacOS/BuddyTool" | grep -q 'arm64'
+          else
+            file "dist/BuddyTool" | grep -q 'arm64'
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -269,12 +368,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install UPX
-        run: sudo apt-get install -y -q upx-ucl
-
       - name: Build CLI with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-package=charset_normalizer --plugin-enable=upx --upx-binary="/usr/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-package=charset_normalizer --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
 
       - name: Verify build
         run: |
