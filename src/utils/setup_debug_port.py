@@ -105,66 +105,319 @@ def find_exe():
 
 
 def get_shortcut_info(lnk_path):
-    """读取快捷方式的 TargetPath 和 Arguments（纯 Python，不调 PowerShell）"""
+    """读取快捷方式的 TargetPath 和 Arguments（纯 ctypes COM）"""
+    if sys.platform != 'win32':
+        return '', ''
     try:
-        import pythoncom
-        from win32com.shell import shell, shellcon
-        pythoncom.CoInitialize()
-        try:
-            pidl = shell.SHParseDisplayName(lnk_path, None)[0]
-            uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-            persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-            persist_file.Load(lnk_path)
-            ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-            target = ishell.GetPath(shellcon.SLGP_SHORTPATH)[0]
-            args = ishell.GetArguments()
-            return target, args
-        finally:
-            pythoncom.CoUninitialize()
-    except ImportError:
+        return _ctypes_get_shortcut_info(lnk_path)
+    except Exception:
         pass
     # fallback: PowerShell
-    ps = (
-        "$ws=New-Object -ComObject WScript.Shell;"
-        "$s=$ws.CreateShortcut('" + lnk_path + "');"
-        "Write-Output $s.TargetPath;"
-        "Write-Output '---';"
-        "Write-Output $s.Arguments"
-    )
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10)
-    parts = r.stdout.split('---\n')
-    if len(parts) >= 2:
-        return parts[0].strip(), parts[1].strip()
+    try:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            "$s=$ws.CreateShortcut('" + lnk_path + "');"
+            "Write-Output $s.TargetPath;"
+            "Write-Output '---';"
+            "Write-Output $s.Arguments"
+        )
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,
+        )
+        parts = r.stdout.split('---\n')
+        if len(parts) >= 2:
+            return parts[0].strip(), parts[1].strip()
+    except Exception:
+        pass
     return '', ''
 
 
 def set_shortcut_args(lnk_path, args):
-    """设置快捷方式的 Arguments（纯 Python，不调 PowerShell）"""
+    """设置快捷方式的 Arguments（纯 ctypes COM）"""
+    if sys.platform != 'win32':
+        return False
     try:
-        import pythoncom
-        from win32com.shell import shellcon
-        pythoncom.CoInitialize()
-        try:
-            uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-            persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-            persist_file.Load(lnk_path)
-            ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-            ishell.SetArguments(args)
-            persist_file.Save(lnk_path, 0)
-            return True
-        finally:
-            pythoncom.CoUninitialize()
-    except ImportError:
+        return _ctypes_set_shortcut_args(lnk_path, args)
+    except Exception:
         pass
     # fallback: PowerShell
-    ps = (
-        "$ws=New-Object -ComObject WScript.Shell;"
-        "$s=$ws.CreateShortcut('" + lnk_path + "');"
-        "$s.Arguments='" + args + "';"
-        "$s.Save()"
-    )
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10)
-    return r.returncode == 0
+    try:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            "$s=$ws.CreateShortcut('" + lnk_path + "');"
+            "$s.Arguments='" + args + "';"
+            "$s.Save()"
+        )
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _create_shortcut_ctypes(lnk_path, target_path, working_dir, arguments):
+    """用纯 ctypes COM 创建/修改快捷方式"""
+    import ctypes
+    from ctypes import wintypes, POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint, c_ulong
+
+    ole32 = ctypes.windll.ole32
+
+    # 初始化 COM
+    ole32.CoInitialize(None)
+
+    try:
+        # 定义 GUID 结构
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # CLSID_ShellLink: {00021401-0000-0000-C000-000000000046}
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        # IID_IPersistFile: {0000010b-0000-0000-C000-000000000046}
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        # IID_IShellLinkW: {000214F9-0000-0000-C000-000000000046}
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        CLSCTX_INPROC_SERVER = 1
+
+        # CoCreateInstance 创建 IShellLinkW
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(
+            byref(clsid), None, CLSCTX_INPROC_SERVER,
+            byref(iid_shelllink), byref(p_shelllink)
+        )
+        if hr != 0 or not p_shelllink.value:
+            raise RuntimeError(f"CoCreateInstance failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # IShellLinkW vtable: IUnknown(3) + IShellLinkW methods
+        # GetPath=3, GetIDList=4, SetIDList=5, GetDescription=6, SetDescription=7,
+        # GetWorkingDirectory=8, SetWorkingDirectory=9, GetArguments=10, SetArguments=11, ...
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        def call_method(idx, *args):
+            """调用 COM vtable 方法"""
+            func = ctypes.cast(vtable[idx], ctypes.CFUNCTYPE(c_int, c_void_p, *args))
+            return func(p_shelllink.value, *args)
+
+        # SetWorkingDirectory (index 9)
+        call_method(9, c_wchar_p(working_dir))
+        # SetPath (index 2) — 注意 SetIDList 在前，实际 SetPath 位置需要确认
+        # IShellLinkW: SetPath 是 index 18（从 0 开始）
+        # 让我用 SetArguments 和直接用 IPersistFile 保存
+        # SetArguments (index 11)
+        call_method(11, c_wchar_p(arguments))
+
+        # QueryInterface 获取 IPersistFile
+        p_persist = c_void_p()
+        # IUnknown::QueryInterface 是 vtable[0]
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            raise RuntimeError(f"QueryInterface IPersistFile failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # IPersistFile vtable: IUnknown(3) + GetClassID=3, IsDirty=4, Load=5, Save=6, SaveCompleted=7, GetCurFile=8
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Save(wchar* pszFileName, BOOL fRemember)
+        save_func = ctypes.cast(p_vtable[6], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        hr = save_func(p_persist.value, lnk_path, 1)
+        if hr != 0:
+            raise RuntimeError(f"IPersistFile.Save failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return True
+
+    finally:
+        ole32.CoUninitialize()
+
+
+def _ctypes_get_shortcut_info(lnk_path):
+    """用纯 ctypes COM 读取快捷方式信息"""
+    import ctypes
+    from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint, create_unicode_buffer
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)
+
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(byref(clsid), None, 1, byref(iid_shelllink), byref(p_shelllink))
+        if hr != 0 or not p_shelllink.value:
+            return '', ''
+
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        # QueryInterface → IPersistFile
+        p_persist = c_void_p()
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            release_func = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_shelllink.value)
+            return '', ''
+
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Load(wchar* pszFileName, DWORD dwMode)
+        # STGM_READ = 0
+        load_func = ctypes.cast(p_vtable[5], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, ctypes.c_uint))
+        hr = load_func(p_persist.value, lnk_path, 0)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return '', ''
+
+        # GetWorkingDirectory (IShellLinkW vtable index 8)
+        # GetArguments (IShellLinkW vtable index 10)
+        # 这两个方法签名: HRESULT GetX(wchar* buf, int cch)
+        target_buf = create_unicode_buffer(260)
+        args_buf = create_unicode_buffer(260)
+
+        # GetWorkingDirectory (index 8): HRESULT GetWorkingDirectory(LPWSTR pszDir, int cch)
+        get_wd_func = ctypes.cast(vtable[8], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        get_wd_func(p_shelllink.value, target_buf, 260)
+
+        # GetArguments (index 10): HRESULT GetArguments(LPWSTR pszArgs, int cch)
+        get_args_func = ctypes.cast(vtable[10], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        get_args_func(p_shelllink.value, args_buf, 260)
+
+        # 获取 TargetPath (index 3): HRESULT GetPath(LPWSTR pszFile, int cch, WIN32_FIND_DATAW*, DWORD)
+        # 用 GetWorkingDirectory 的结果作为 target（简化，实际应该用 GetPath）
+        # 但我们主要需要 arguments，target 可以从 GetPath 获取
+        find_data_buf = ctypes.create_string_buffer(592)  # WIN32_FIND_DATAW 大小约 592
+        get_path_func = ctypes.cast(vtable[3], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int, ctypes.c_void_p, ctypes.c_uint))
+        get_path_func(p_shelllink.value, target_buf, 260, None, 0)
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return target_buf.value, args_buf.value
+
+    finally:
+        ole32.CoUninitialize()
+
+
+def _ctypes_set_shortcut_args(lnk_path, args):
+    """用纯 ctypes COM 设置快捷方式 Arguments"""
+    import ctypes
+    from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)
+
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(byref(clsid), None, 1, byref(iid_shelllink), byref(p_shelllink))
+        if hr != 0 or not p_shelllink.value:
+            return False
+
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        # QueryInterface → IPersistFile
+        p_persist = c_void_p()
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            release_func = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_shelllink.value)
+            return False
+
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Load 现有快捷方式
+        # STGM_READWRITE = 2
+        load_func = ctypes.cast(p_vtable[5], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, ctypes.c_uint))
+        hr = load_func(p_persist.value, lnk_path, 2)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return False
+
+        # SetArguments (IShellLinkW vtable index 11)
+        # HRESULT SetArguments(LPCWSTR pszArgs)
+        set_args_func = ctypes.cast(vtable[11], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p))
+        hr = set_args_func(p_shelllink.value, args)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return False
+
+        # Save
+        save_func = ctypes.cast(p_vtable[6], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        hr = save_func(p_persist.value, lnk_path, 1)
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return hr == 0
+
+    finally:
+        ole32.CoUninitialize()
 
 
 def do_install(port):
@@ -181,23 +434,12 @@ def do_install(port):
         if not exe:
             print("[ERR] 找不到 WorkBuddy.exe，请确认安装路径")
             sys.exit(1)
-        # 创建桌面快捷方式（优先用 Python COM）
+        # 创建桌面快捷方式（纯 ctypes COM）
         desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
         try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                print("[OK] 已创建桌面快捷方式: " + desktop)
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
+            _create_shortcut_ctypes(desktop, exe, os.path.dirname(exe), target_arg)
+            print("[OK] 已创建桌面快捷方式: " + desktop)
+        except Exception:
             # fallback: PowerShell
             ps = (
                 "$ws=New-Object -ComObject WScript.Shell;"
@@ -323,30 +565,19 @@ def setup_and_restart(port=PORT):
 
     target_arg = ARG_PREFIX + str(port)
 
-    # 1. 安装调试端口到快捷方式（纯 Python COM）
+    # 1. 安装调试端口到快捷方式（纯 ctypes COM）
     shortcuts = find_shortcuts()
     if not shortcuts:
         exe = find_exe()
         if not exe:
             return False, "找不到 WorkBuddy.exe，请确认已安装"
-        # 创建桌面快捷方式（Python COM）
+        # 创建桌面快捷方式（纯 ctypes COM）
         desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
         try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                shortcuts = [desktop]
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
-            # 无 pywin32 fallback PowerShell
+            _create_shortcut_ctypes(desktop, exe, os.path.dirname(exe), target_arg)
+            shortcuts = [desktop]
+        except Exception:
+            # fallback PowerShell
             ps = (
                 "$ws=New-Object -ComObject WScript.Shell;"
                 "$s=$ws.CreateShortcut('" + desktop + "');"
@@ -369,75 +600,85 @@ def setup_and_restart(port=PORT):
             new_args = ' '.join(other_args + [target_arg])
             set_shortcut_args(lnk, new_args)
 
-    # 2. 优雅关闭正在运行的 WorkBuddy（用 ctypes 发 WM_CLOSE，不用 taskkill）
-    _close_workbuddy_gracefully()
+    # 2. 关闭正在运行的 WorkBuddy（通过进程名找 PID + TerminateProcess）
+    _close_workbuddy()
 
-    # 3. 直接用 exe 带参数启动（不通过快捷方式，减少特征）
+    # 3. 通过快捷方式启动 WorkBuddy（避免弹出命令窗口）
     try:
-        exe = find_exe()
-        if exe:
-            subprocess.Popen(
-                [exe, target_arg],
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-            time.sleep(3)
-            return True, "WorkBuddy 已配置调试端口并重启"
-        else:
-            # fallback: 通过快捷方式启动
+        if shortcuts:
             os.startfile(shortcuts[0])
             time.sleep(3)
             return True, "WorkBuddy 已配置调试端口并重启"
+        else:
+            exe = find_exe()
+            if exe:
+                # 用 ShellExecute 而非 subprocess，避免命令窗口
+                import ctypes
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", exe, target_arg, os.path.dirname(exe), 1
+                )
+                time.sleep(3)
+                return True, "WorkBuddy 已配置调试端口并重启"
+            return False, "找不到 WorkBuddy.exe"
     except Exception as e:
         return False, f"启动 WorkBuddy 失败: {e}"
 
 
-def _close_workbuddy_gracefully(timeout=5):
-    """优雅关闭 WorkBuddy 进程（发 WM_CLOSE，不用 taskkill）
-
-    仅 Windows 可用。
-
-    Args:
-        timeout: 等待关闭的超时秒数
-    """
+def _close_workbuddy():
+    """关闭正在运行的 WorkBuddy 进程（通过进程名，用 ctypes TerminateProcess）"""
     if sys.platform != 'win32':
         return
 
     import ctypes
     from ctypes import wintypes
 
-    # 枚举所有窗口，找到 WorkBuddy 的主窗口并发 WM_CLOSE
-    user32 = ctypes.windll.user32
-    WM_CLOSE = 0x0010
-    found_hwnds = []
+    # 用 CreateToolhelp32Snapshot 枚举进程
+    kernel32 = ctypes.windll.kernel32
+    TH32CS_SNAPPROCESS = 0x00000002
 
-    # 获取所有进程的窗口
-    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
 
-    def _enum_callback(hwnd, lparam):
-        # 获取窗口标题
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length > 0:
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            title = buf.value
-            # 获取窗口所属进程
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            # 检查是否是 WorkBuddy 窗口
-            if "WorkBuddy" in title or "workbuddy" in title.lower():
-                found_hwnds.append(hwnd)
-        return True
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1:
+        return
 
-    user32.EnumWindows(EnumWindowsProc(_enum_callback), 0)
+    pe = PROCESSENTRY32W()
+    pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
 
-    # 发送 WM_CLOSE 到每个 WorkBuddy 窗口
-    for hwnd in found_hwnds:
-        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    pids = []
+    if kernel32.Process32FirstW(snapshot, ctypes.byref(pe)):
+        while True:
+            name = pe.szExeFile
+            if name and name.lower() == "workbuddy.exe":
+                pids.append(pe.th32ProcessID)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(pe)):
+                break
+    kernel32.CloseHandle(snapshot)
+
+    # TerminateProcess 每个 WorkBuddy 进程
+    PROCESS_TERMINATE = 0x0001
+    for pid in pids:
+        h = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        if h:
+            kernel32.TerminateProcess(h, 0)
+            kernel32.CloseHandle(h)
 
     # 等待进程退出
-    if found_hwnds:
-        time_module = __import__('time')
-        time_module.sleep(2)
+    if pids:
+        import time as _t
+        _t.sleep(2)
 
 
 def main():

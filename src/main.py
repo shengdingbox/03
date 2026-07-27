@@ -102,6 +102,55 @@ def main():
     """应用入口"""
     _setup_logging()
 
+    # Linux 无 X11 环境下设置 offscreen，避免 Qt xcb 插件加载失败
+    if sys.platform.startswith('linux'):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+    # CLI 模式：第一个参数是 cli 子命令时，走命令行不启动 GUI
+    if len(sys.argv) >= 2 and sys.argv[1] in ("info", "credits", "redeem", "start", "config", "help", "--help", "-h"):
+
+        # 打包后 --windows-console-mode=disable 模式下，需要动态分配控制台
+        if sys.platform == 'win32' and not sys.stdin.isatty():
+            import ctypes
+            import io
+            kernel32 = ctypes.windll.kernel32
+            # 附加到父进程的控制台（从 cmd 运行时）
+            if kernel32.AttachConsole(-1) == 0:
+                # 附加失败则分配新控制台
+                kernel32.AllocConsole()
+            # 重定向 stdout/stderr 到控制台
+            try:
+                # 打开 CONOUT$ 并重定向
+                conout = ctypes.c_void_p(kernel32.CreateFileW(
+                    b"CONOUT$\x00".decode('ascii'),
+                    0x40000000,  # GENERIC_WRITE
+                    0x00000003,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    None,
+                    3,           # OPEN_EXISTING
+                    0,
+                    None,
+                ))
+                if conout.value:
+                    # 重定向标准输出
+                    kernel32.SetStdHandle(-11, conout)  # STD_OUTPUT_HANDLE
+                    # 重定向标准错误
+                    conerr = ctypes.c_void_p(kernel32.CreateFileW(
+                        b"CONOUT$\x00".decode('ascii'),
+                        0x40000000, 3, None, 3, 0, None,
+                    ))
+                    if conerr.value:
+                        kernel32.SetStdHandle(-12, conerr)  # STD_ERROR_HANDLE
+                    # 重新绑定 Python 的 sys.stdout/stderr
+                    sys.stdout = io.TextIOWrapper(
+                        io.FileIO(conout.value, 'w'), encoding='utf-8', errors='replace'
+                    )
+                    sys.stderr = sys.stdout
+            except Exception:
+                pass
+
+        from .cli import main as cli_main
+        sys.exit(cli_main())
+
     # 注册 atexit 清理（即使异常退出也尝试清理）
     atexit.register(_force_cleanup)
 
@@ -120,6 +169,40 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Buddy Tool")
     app.setOrganizationName("Buddy")
+
+    # macOS: 让程序出现在 Dock 和应用切换器中
+    # Nuitka onefile 生成的是纯可执行文件（非 .app bundle），
+    # 默认不会在 Dock 显示，用户关闭窗口后无法找到应用
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApp, NSApplicationActivateIgnoringOtherApps
+            # 设置为普通应用（显示在 Dock 中）
+            NSApp.setActivationPolicy_(1)  # NSApplicationActivationPolicyRegular = 1
+            NSApp.activateIgnoringOtherApps_(True)
+        except ImportError:
+            # AppKit 不可用时用纯 ctypes 方式
+            try:
+                import ctypes
+                libobjc = ctypes.cdll.LoadLibrary(
+                    "/usr/lib/libobjc.dylib"
+                )
+                libobjc.objc_getClass.restype = ctypes.c_void_p
+                libobjc.sel_registerName.restype = ctypes.c_void_p
+                libobjc.objc_msgSend.restype = ctypes.c_void_p
+                libobjc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+
+                NSApp_class = libobjc.objc_getClass(b"NSApplication")
+                sel_sharedApp = libobjc.sel_registerName(b"sharedApplication")
+                ns_app = libobjc.objc_msgSend(NSApp_class, sel_sharedApp)
+
+                sel_setActivationPolicy = libobjc.sel_registerName(b"setActivationPolicy:")
+                libobjc.objc_msgSend(ns_app, sel_setActivationPolicy, 1)  # Regular
+
+                sel_activate = libobjc.sel_registerName(b"activateIgnoringOtherApps:")
+                libobjc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+                libobjc.objc_msgSend(ns_app, sel_activate, True)
+            except Exception:
+                pass
 
     # 单实例检查
     if not _check_single_instance():
@@ -165,8 +248,8 @@ def main():
         env_result = check_environment()
         env_text = format_env_warnings(env_result)
         if env_text:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(_main_window, "环境检测", env_text)
+            logger.info(f"[环境检测] {env_text}")
+            # 弹窗已关闭，检测结果只记录到日志
     except Exception as e:
         logger.warning(f"环境检测失败: {e}")
 

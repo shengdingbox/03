@@ -464,25 +464,6 @@ class DashboardPage(QWidget):
         btn_copy_subkey.clicked.connect(self._copy_subkey)
         subkey_row.addWidget(btn_copy_subkey)
 
-        btn_regen_subkey = QPushButton("🔄 重新生成")
-        btn_regen_subkey.setCursor(Qt.PointingHandCursor)
-        btn_regen_subkey.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self._colors['accent']};
-                color: #FFFFFF;
-                border: none;
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['accent_hover']};
-            }}
-        """)
-        btn_regen_subkey.clicked.connect(self._regen_subkey)
-        subkey_row.addWidget(btn_regen_subkey)
-
         subkey_row.addStretch()
         proxy_ctrl_layout.addLayout(subkey_row)
 
@@ -889,6 +870,17 @@ class DashboardPage(QWidget):
             except Exception:
                 pass
             self._render_credits(result)
+
+            # 余额 > 10 且服务未运行时，自动启动服务
+            try:
+                balance = float(result.get("credits", 0))
+            except (TypeError, ValueError):
+                balance = 0.0
+
+            if balance > 10 and self._proxy_page:
+                ps = self._proxy_page._proxy_server
+                if not (ps and ps.is_running):
+                    self._toggle_proxy_service()
         else:
             err = result.get("error", "无响应") if result else "无响应"
             self._quota_value_label.setText("--")
@@ -962,6 +954,71 @@ class DashboardPage(QWidget):
                 "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
                 "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
             )
+
+    def _show_loading_dialog(self, text: str = "正在启动服务..."):
+        """创建并显示加载弹窗（带旋转动画）"""
+        self._loading_dialog = QDialog(self)
+        self._loading_dialog.setWindowTitle("请稍候")
+        self._loading_dialog.setModal(True)
+        self._loading_dialog.setMinimumWidth(320)
+        self._loading_dialog.setWindowFlags(
+            self._loading_dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(self._loading_dialog)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # 旋转加载图标
+        from PySide6.QtCore import QPropertyAnimation, QByteArray
+        self._loading_spinner = QLabel("◐")
+        self._loading_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_spinner.setStyleSheet(f"font-size: 36px; color: {self._colors['accent']};")
+        layout.addWidget(self._loading_spinner)
+
+        # 旋转动画
+        self._loading_anim = QPropertyAnimation(
+            self._loading_spinner, QByteArray(b"rotation")
+        )
+        # QLabel 没有 rotation 属性，用定时器旋转文字替代
+        from PySide6.QtCore import QTimer
+        self._loading_chars = ["◐", "◓", "◑", "◒"]
+        self._loading_idx = 0
+        self._loading_timer = QTimer()
+        self._loading_timer.timeout.connect(self._rotate_loading)
+        self._loading_timer.start(150)
+
+        # 提示文字
+        self._loading_label = QLabel(text)
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 500; color: {self._colors['text_primary']};"
+        )
+        layout.addWidget(self._loading_label)
+
+        self._loading_dialog.show()
+
+    def _rotate_loading(self):
+        """旋转加载图标"""
+        self._loading_idx = (self._loading_idx + 1) % len(self._loading_chars)
+        self._loading_spinner.setText(self._loading_chars[self._loading_idx])
+
+    def _update_loading_text(self, text: str):
+        """更新加载弹窗提示文字"""
+        if hasattr(self, '_loading_label') and self._loading_label:
+            self._loading_label.setText(text)
+
+    def _close_loading_dialog(self):
+        """关闭加载弹窗"""
+        if hasattr(self, '_loading_timer') and self._loading_timer:
+            self._loading_timer.stop()
+        if hasattr(self, '_loading_dialog') and self._loading_dialog:
+            self._loading_dialog.close()
+            self._loading_dialog.deleteLater()
+            self._loading_dialog = None
+            self._loading_label = None
+            self._loading_spinner = None
 
     def _show_diag_dialog(self, port: int):
         """创建并显示诊断弹窗"""
@@ -1045,16 +1102,99 @@ class DashboardPage(QWidget):
         except Exception:
             pass
 
-        # 服务未运行 → 显示诊断弹窗
+        # 自动同步配置到所选客户端（根据勾选）
+        self._auto_sync_config_before_start()
+
+        # 显示加载弹窗
         port = self._port_spin.value()
-        self._show_diag_dialog(port)
+        self._show_loading_dialog("正在启动服务...")
         self._toggle_proxy_btn.setEnabled(False)
         self._proxy_status_label.setText("⏳ 正在启动...")
         self._proxy_status_label.setStyleSheet("font-weight: 600; color: #D69E2E;")
 
-        # 启动诊断动画
+        # 直接获取 BuddyKey（不再走诊断动画）
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(200, lambda: self._run_diag_animation(port))
+        QTimer.singleShot(300, lambda: self._fetch_buddykey())
+
+    def _auto_sync_config_before_start(self):
+        """启动服务前自动同步配置到所选客户端（根据勾选）
+
+        与 _apply_config 类似，但不弹确认窗、不弹成功提示，
+        只在后台静默写入 models.json + 配置调试端口。
+        """
+        self._save_client_config()
+        if not self._proxy_page:
+            return
+
+        from pathlib import Path
+        import os
+        from datetime import datetime
+        from shutil import copy2
+
+        # 检查是否有勾选目标
+        targets = []
+        if self._chk_workbuddy.isChecked():
+            targets.append(("WorkBuddy", Path.home() / ".workbuddy"))
+        if self._chk_codebuddy.isChecked():
+            targets.append(("CodeBuddy", Path.home() / ".codebuddy"))
+
+        if not targets:
+            return
+
+        # 生成配置 JSON
+        try:
+            config_json = self._build_config_json()
+        except Exception as e:
+            logger.warning(f"启动服务时生成配置 JSON 失败: {e}")
+            return
+
+        # 自动备份
+        if self._chk_auto_backup.isChecked():
+            backup_root = Path.home() / ".buddy-tool" / "config_backups"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for name, target_dir in targets:
+                src = target_dir / "models.json"
+                if src.exists():
+                    dst = backup_root / f"{name.lower()}_{ts}.json"
+                    try:
+                        copy2(str(src), str(dst))
+                    except Exception as e:
+                        logger.warning(f"备份 {name} 配置失败: {e}")
+
+        # 写入配置
+        for name, target_dir in targets:
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / "models.json"
+                target_path.write_text(config_json, encoding="utf-8")
+                logger.info(f"启动服务: 已同步配置到 {name}")
+            except Exception as e:
+                logger.warning(f"启动服务: 同步配置到 {name} 失败: {e}")
+
+        # 如果勾选了 WorkBuddy，后台配置调试端口并重启（静默，不弹窗）
+        if self._chk_workbuddy.isChecked():
+            from PySide6.QtCore import QThread, Signal as QSignal
+
+            class _SilentWorkbuddySetupThread(QThread):
+                done = QSignal(bool, str)
+
+                def run(self):
+                    try:
+                        from ...utils.setup_debug_port import setup_and_restart
+                        ok, msg = setup_and_restart()
+                        self.done.emit(ok, msg)
+                    except Exception as e:
+                        self.done.emit(False, str(e))
+
+            self._silent_workbuddy_thread = _SilentWorkbuddySetupThread()
+            self._silent_workbuddy_thread.done.connect(
+                lambda ok, msg: logger.info(f"启动服务: WorkBuddy 配置 {'成功' if ok else '失败'} - {msg}")
+            )
+            self._silent_workbuddy_thread.finished.connect(
+                lambda: setattr(self, '_silent_workbuddy_thread', None)
+            )
+            self._silent_workbuddy_thread.start()
 
     def _fetch_buddykey(self):
         """后台请求 BuddyKey"""
@@ -1080,28 +1220,41 @@ class DashboardPage(QWidget):
         """获取 BuddyKey 完成"""
         if not result or not result.get("success"):
             err = (result or {}).get("error") or (result or {}).get("message") or "未知错误"
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", f"无法获取激活码：{err}")
             return
 
         buddy_key = result.get("buddyKey", "")
         if not buddy_key:
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", "服务端未返回激活码")
+            return
+
+        # 检查余额，余额为 0 时拒绝启动
+        balance = result.get("balance", 0)
+        if balance is None:
+            balance = 0
+        try:
+            balance = float(balance)
+        except (TypeError, ValueError):
+            balance = 0.0
+
+        if balance <= 0:
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setEnabled(True)
+            self._close_loading_dialog()
+            QMessageBox.warning(self, "无法启动", f"账户余额为 0，请充值后再启动服务。")
             return
 
         # 在后台线程中处理 key 写入和服务启动，避免主线程阻塞
         from PySide6.QtCore import QThread, Signal as QSignal
-
-        balance = result.get("balance", 0)
 
         class StartServiceThread(QThread):
             done = QSignal(bool)
@@ -1146,11 +1299,10 @@ class DashboardPage(QWidget):
     def _on_service_started(self, success: bool):
         """服务启动完成回调（在主线程执行）"""
         if not success:
-            self._diag_title.setText("❌ 启动失败")
             self._proxy_status_label.setText("⏹ 已停止")
             self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
             self._toggle_proxy_btn.setEnabled(True)
-            self._close_diag_dialog()
+            self._close_loading_dialog()
             QMessageBox.warning(self, "启动失败", "服务启动过程中发生错误")
             return
 
@@ -1159,8 +1311,8 @@ class DashboardPage(QWidget):
         self._toggle_proxy_btn.setEnabled(True)
         self._sync_proxy_status()
 
-        # 关闭诊断弹窗
-        self._close_diag_dialog()
+        # 关闭加载弹窗
+        self._close_loading_dialog()
 
     def _apply_toggle_btn_style(self):
         """根据服务状态设置按钮内联样式"""
@@ -1214,45 +1366,6 @@ class DashboardPage(QWidget):
         if key and key != "sk-":
             QApplication.clipboard().setText(key)
 
-    def _regen_subkey(self):
-        """重新生成子 API Key"""
-        if not self._proxy_page:
-            return
-        reply = QMessageBox.question(
-            self, "确认",
-            "重新生成后旧的 API Key 将失效，确定继续吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        import secrets as _sec
-        from datetime import datetime
-        db = self._proxy_page._db
-
-        # 删除旧的子 key，创建新的
-        for sk in db.get_sub_api_keys():
-            db.delete_sub_api_key(sk.get("key_id", ""))
-
-        new_key = f"sk-{_sec.token_urlsafe(32)}"
-        sub_key_data = {
-            "key_id": f"sk_{_sec.token_hex(4)}",
-            "api_key": new_key,
-            "label": "",
-            "is_active": True,
-            "allowed_models": [],
-            "allowed_key_ids": [],
-            "max_usage": 0,
-            "used_count": 0,
-            "rate_limit_rpm": 1000,
-            "key_mode": 1,
-            "created_at": datetime.now().isoformat(),
-        }
-        db.add_sub_api_key(sub_key_data)
-        self._proxy_page._invalidate_proxy_auth_cache()
-        self._refresh_subkey_display()
-
     def _refresh_subkey_display(self):
         """刷新子 API Key 显示"""
         if not self._proxy_page:
@@ -1261,7 +1374,7 @@ class DashboardPage(QWidget):
         if sub_keys:
             self._subkey_label.setText(sub_keys[0].get("api_key", "sk-"))
         else:
-            self._subkey_label.setText("sk-（点击重新生成创建）")
+            self._subkey_label.setText("sk-（启动服务后自动生成）")
 
     def _open_backup_dir(self):
         """打开备份目录"""
@@ -1286,7 +1399,7 @@ class DashboardPage(QWidget):
             pass
 
     def _build_config_json(self) -> str:
-        """根据当前端口、子 API Key 和 SUPPORTED_MODELS 生成配置 JSON"""
+        """根据当前端口、子 API Key 和服务端模型列表生成配置 JSON"""
         import json
         import secrets as _sec
         from datetime import datetime
@@ -1317,51 +1430,75 @@ class DashboardPage(QWidget):
 
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
 
-        # 模型名称映射
-        _name_map = {
-            "auto": "自动模式（智能选择）",
-            "deepseek-v4-pro": "DeepSeek V4 Pro",
-            "deepseek-v4-flash": "DeepSeek V4 Flash",
-            "deepseek-v3-2-volc": "DeepSeek V3.2",
-            "deepseek-v3-1": "DeepSeek V3.1",
-            "deepseek-v3-0324": "DeepSeek V3-0324",
-            "deepseek-r1": "DeepSeek R1",
-            "glm-5.2": "GLM-5.2",
-            "glm-5.1": "GLM-5.1",
-            "glm-5.0": "GLM-5.0",
-            "glm-5.0-turbo": "GLM-5.0 Turbo",
-            "glm-5v-turbo": "GLM-5v Turbo",
-            "glm-4.7": "GLM-4.7",
-            "glm-4.6": "GLM-4.6",
-            "minimax-m3": "MiniMax M3",
-            "minimax-m2.7": "MiniMax M2.7",
-            "minimax-m2.5": "MiniMax M2.5",
-            "kimi-k2.6": "Kimi K2.6",
-            "kimi-k2.5": "Kimi K2.5",
-            "kimi-k2.7": "Kimi K2.7",
-            "hy3": "Hy3",
-            "hy3-preview": "Hy3 Preview",
-            "hunyuan-chat": "Hunyuan Chat",
-            "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
-        }
-
         # 模型前缀
         prefix = self._model_prefix_input.text().strip()
 
+        # 优先从服务端获取模型列表
         models = []
-        for m in SUPPORTED_MODELS:
-            models.append({
-                "id": f"{prefix}{m}" if prefix else m,
-                "name": _name_map.get(m, m),
-                "vendor": "Buddy",
-                "apiKey": api_key,
-                "url": url,
-                "maxInputTokens": MODEL_CONTEXT_LENGTHS.get(m, 128000),
-                "maxOutputTokens": MODEL_MAX_OUTPUT_TOKENS.get(m, 8192),
-                "supportsToolCall": True,
-                "supportsImages": True,
-                "supportsReasoning": True,
-            })
+        try:
+            from ...utils.server_api import get_models_list
+            result = get_models_list()
+            if result and not result.get("error") and result.get("models"):
+                for m in result["models"]:
+                    model_id = m.get("id", "")
+                    if not model_id:
+                        continue
+                    models.append({
+                        "id": f"{prefix}{model_id}" if prefix else model_id,
+                        "name": m.get("name", model_id),
+                        "vendor": "Buddy",
+                        "apiKey": api_key,
+                        "url": url,
+                        "maxInputTokens": m.get("maxInputTokens", 128000),
+                        "maxOutputTokens": m.get("maxOutputTokens", 8192),
+                        "supportsToolCall": m.get("supportsToolCall", True),
+                        "supportsImages": m.get("supportsImages", True),
+                        "supportsReasoning": m.get("supportsReasoning", True),
+                    })
+        except Exception as e:
+            logger.warning(f"从服务端获取模型列表失败: {e}")
+
+        # 服务端获取失败时，使用本地硬编码模型列表作为 fallback
+        if not models:
+            _name_map = {
+                "auto": "自动模式（智能选择）",
+                "deepseek-v4-pro": "DeepSeek V4 Pro",
+                "deepseek-v4-flash": "DeepSeek V4 Flash",
+                "deepseek-v3-2-volc": "DeepSeek V3.2",
+                "deepseek-v3-1": "DeepSeek V3.1",
+                "deepseek-v3-0324": "DeepSeek V3-0324",
+                "deepseek-r1": "DeepSeek R1",
+                "glm-5.2": "GLM-5.2",
+                "glm-5.1": "GLM-5.1",
+                "glm-5.0": "GLM-5.0",
+                "glm-5.0-turbo": "GLM-5.0 Turbo",
+                "glm-5v-turbo": "GLM-5v Turbo",
+                "glm-4.7": "GLM-4.7",
+                "glm-4.6": "GLM-4.6",
+                "minimax-m3": "MiniMax M3",
+                "minimax-m2.7": "MiniMax M2.7",
+                "minimax-m2.5": "MiniMax M2.5",
+                "kimi-k2.6": "Kimi K2.6",
+                "kimi-k2.5": "Kimi K2.5",
+                "kimi-k2.7": "Kimi K2.7",
+                "hy3": "Hy3",
+                "hy3-preview": "Hy3 Preview",
+                "hunyuan-chat": "Hunyuan Chat",
+                "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
+            }
+            for m in SUPPORTED_MODELS:
+                models.append({
+                    "id": f"{prefix}{m}" if prefix else m,
+                    "name": _name_map.get(m, m),
+                    "vendor": "Buddy",
+                    "apiKey": api_key,
+                    "url": url,
+                    "maxInputTokens": MODEL_CONTEXT_LENGTHS.get(m, 128000),
+                    "maxOutputTokens": MODEL_MAX_OUTPUT_TOKENS.get(m, 8192),
+                    "supportsToolCall": True,
+                    "supportsImages": True,
+                    "supportsReasoning": True,
+                })
 
         return json.dumps({"models": models}, ensure_ascii=False, indent=2)
 

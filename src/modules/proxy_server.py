@@ -53,52 +53,25 @@ def _inject_credits_to_workbuddy(credits: float):
         logger.warning(f"[WorkBuddy注入] 异常: {e}", exc_info=True)
 
 # ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
-# 用于 proxy_db.db 文件内容加密，纯 Python 实现，无外部依赖
+# 用于 proxy_db.key 文件内容加密（AES-256-GCM + 机器绑定密钥）
 
-_XXTEA_KEY = b"AT-XTEA-2026"  # 固定密钥
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+
+# 旧版 XXTEA 密钥（仅用于读取旧格式数据时回退解密）
+from ..utils._obfuscate import get_bytes as _obf_bytes
+_XXTEA_KEY_LEGACY = _obf_bytes("XXTEA_KEY")
 
 
 def _xxtea_mx(sum_: int, y: int, z: int, p: int, key: list) -> int:
-    """XXTEA 混淆函数"""
+    """XXTEA 混淆函数（仅用于旧格式回退解密）"""
     return (
         (((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^
         ((sum_ ^ y) + (key[(p & 3) ^ (sum_ & 3)] ^ z))
     ) & 0xFFFFFFFF
 
 
-def _xxtea_encrypt_bytes(data: bytes, key: bytes) -> bytes:
-    """XXTEA 加密字节流"""
-    # 将 key 补齐到 16 字节
-    key = (key + b'\x00' * 16)[:16]
-    k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
-
-    # 数据补齐到 4 字节倍数
-    pad_len = (4 - len(data) % 4) % 4
-    data += b'\x00' * pad_len
-    n = len(data) // 4
-    if n < 2:
-        # 不足 2 块时扩展到 2 块
-        data += b'\x00' * 4
-        n = 2
-
-    v = [int.from_bytes(data[i:i+4], 'little') for i in range(0, len(data), 4)]
-    DELTA = 0x9E3779B9
-    rounds = 6 + 52 // n
-    sum_ = 0
-    z = v[n - 1]
-    for _ in range(rounds):
-        sum_ = (sum_ + DELTA) & 0xFFFFFFFF
-        e = (sum_ >> 2) & 3
-        for p in range(n):
-            y = v[(p + 1) % n]
-            v[p] = (v[p] + _xxtea_mx(sum_, y, z, p, k)) & 0xFFFFFFFF
-            z = v[p]
-
-    return b''.join(vi.to_bytes(4, 'little') for vi in v)
-
-
 def _xxtea_decrypt_bytes(data: bytes, key: bytes) -> bytes:
-    """XXTEA 解密字节流"""
+    """XXTEA 解密字节流（仅用于旧格式回退解密）"""
     key = (key + b'\x00' * 16)[:16]
     k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
 
@@ -122,25 +95,90 @@ def _xxtea_decrypt_bytes(data: bytes, key: bytes) -> bytes:
     return b''.join(vi.to_bytes(4, 'little') for vi in v)
 
 
+# 机器绑定密钥缓存
+_local_db_key_cache: bytes | None = None
+
+
+def _get_local_db_key() -> bytes:
+    """从机器特征派生 AES-256 密钥（32 字节）
+
+    综合磁盘序列号、CPU ID、主机名，通过 SHA-256 派生。
+    每台机器密钥不同，换机器/重装系统后旧 proxy_db.key 无法解密。
+    """
+    global _local_db_key_cache
+    if _local_db_key_cache is not None:
+        return _local_db_key_cache
+
+    from ..utils.machine import _get_disk_serial, _get_cpu_id, _get_hostname
+
+    parts = [
+        _get_disk_serial(),
+        _get_cpu_id(),
+        _get_hostname(),
+    ]
+    raw = "buddy_db|" + "|".join(parts)
+    _local_db_key_cache = hashlib.sha256(raw.encode("utf-8")).digest()
+    return _local_db_key_cache
+
+
+# 文件头标记，区分新旧格式
+_DB_MAGIC_V2 = b"BTG1"  # Buddy Tool GCM v1
+
+
 def _encrypt_json(data) -> str:
-    """将 Python 对象序列化为加密字符串（纯 Base64，无任何头部标记）"""
+    """将 Python 对象序列化为加密字符串（AES-256-GCM + 机器绑定密钥）
+
+    格式：base64( magic(4B) + nonce(12B) + ciphertext+tag )
+    """
     raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    # 将原始长度（4 字节小端序）拼在数据前面，解密后据此裁剪 padding
-    orig_len_bytes = len(raw).to_bytes(4, 'little')
-    payload = orig_len_bytes + raw
-    encrypted = _xxtea_encrypt_bytes(payload, _XXTEA_KEY)
-    return base64.b64encode(encrypted).decode("ascii")
+    key = _get_local_db_key()
+    nonce = secrets.token_bytes(12)
+    aesgcm = _AESGCM(key)
+    ct_and_tag = aesgcm.encrypt(nonce, raw, associated_data=None)
+    # cryptography 库输出: ciphertext + tag(16B)
+    payload = _DB_MAGIC_V2 + nonce + ct_and_tag
+    return base64.b64encode(payload).decode("ascii")
 
 
 def _decrypt_json(text: str):
-    """将加密字符串反序列化为 Python 对象"""
+    """将加密字符串反序列化为 Python 对象
+
+    支持：
+    - 新格式（AES-256-GCM + 机器绑定密钥，magic BTG1）
+    - 旧格式（XXTEA + 硬编码密钥，无 magic，前 4 字节是 orig_len）
+    - 明文 JSON
+
+    失败时抛 ValueError（被调用方捕获处理）。
+    """
     text = text.strip()
-    encrypted = base64.b64decode(text)
-    decrypted = _xxtea_decrypt_bytes(encrypted, _XXTEA_KEY)
-    # 前 4 字节是原始数据长度
+    try:
+        raw_bytes = base64.b64decode(text)
+    except Exception:
+        # 不是有效 base64，可能是明文 JSON
+        return json.loads(text)
+
+    # 检查是否是新格式（magic BTG1）
+    if raw_bytes[:4] == _DB_MAGIC_V2:
+        key = _get_local_db_key()
+        nonce = raw_bytes[4:16]        # 12 字节 nonce
+        ct_and_tag = raw_bytes[16:]    # ciphertext + tag(16B)
+        aesgcm = _AESGCM(key)
+        try:
+            plaintext = aesgcm.decrypt(nonce, ct_and_tag, associated_data=None)
+            return json.loads(plaintext.decode("utf-8"))
+        except Exception as e:
+            raise ValueError(f"AES-GCM 解密失败（可能机器已变更）: {e}")
+
+    # 旧格式：XXTEA + 硬编码密钥
+    decrypted = _xxtea_decrypt_bytes(raw_bytes, _XXTEA_KEY_LEGACY)
     orig_len = int.from_bytes(decrypted[:4], 'little')
+    if orig_len <= 0 or orig_len > len(decrypted) - 4:
+        raise ValueError(f"旧格式解密后长度字段异常: orig_len={orig_len}, data_len={len(decrypted)}")
     raw = decrypted[4:4 + orig_len]
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("解密后数据不是有效 UTF-8，可能密钥不匹配或文件损坏")
 
 
 # ─── 上游代理地址（加密隐藏，用户在UI上看不到）───
@@ -169,7 +207,7 @@ SUPPORTED_MODELS = [
     # MiniMax
     "minimax-m3", "minimax-m2.7", "minimax-m2.5",
     # Kimi
-    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7",
+    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7","kimi-k3",
     # 混元
     "hy3", "hy3-preview", "hunyuan-chat", "hunyuan-2.0-thinking",
 ]
@@ -205,6 +243,7 @@ MODEL_CONTEXT_LENGTHS = {
     "kimi-k2.6": 256000,               # 256K
     "kimi-k2.5": 1000000,              # 百万级上下文
     "kimi-k2.7": 256000,               # 256K
+    "kimi-k3": 1000000,               # 256K
     # 混元
     "hy3": 256000,                     # 256K
     "hy3-preview": 256000,             # 256K
@@ -224,6 +263,7 @@ MODEL_SUPPORTS_IMAGES = {
     "glm-4.6": True,
     # 新增模型
     "kimi-k2.7": True,
+    "kimi-k3": True,
     "hy3": True,
 }
 
@@ -238,6 +278,7 @@ MODEL_MAX_OUTPUT_TOKENS = {
     "glm-4.6": 131072,
     # 新增模型
     "kimi-k2.7": 131072,
+    "kimi-k3": 131072,
     "hy3": 131072,
 }
 
@@ -1216,7 +1257,7 @@ class RequestLog:
 
 class ProxyDatabase:
     """代理服务数据存储 - JSON 文件持久化
-    
+
     性能优化：
     - 延迟写入：数据变更后不立即写盘，由定时器批量刷盘
     - 内存优先：所有读操作直接从内存返回，不读文件
@@ -1249,13 +1290,59 @@ class ProxyDatabase:
         if not data_dir:
             data_dir = os.path.expanduser("~/.buddy-tool")
         os.makedirs(data_dir, exist_ok=True)
-        self._db_path = os.path.join(data_dir, "proxy_db.db")
+        self._db_path = os.path.join(data_dir, "proxy_db.key")
+        # 迁移旧的 proxy_db.db → proxy_db.key（仅首次执行）
+        self._migrate_legacy_db(data_dir)
         self._lock = threading.RLock()  # 可重入锁，避免 _save() 被已持锁的方法调用时死锁
         self._data = self._load()
         self._dirty = False  # 是否有未保存的变更
         self._save_timer = None  # 延迟保存定时器
         self._key_status_version = 0  # Key 状态变更版本号，每次状态变化 +1，ProxyRouter 据此刷新缓存
         self._sub_key_version = 0  # 子 Key 变更版本号，每次增删改 +1，ProxyRouter 据此刷新认证缓存
+
+    def _migrate_legacy_db(self, data_dir: str):
+        """如果存在旧的 proxy_db.db 且不存在 proxy_db.key，则迁移并删除旧文件"""
+        import os
+        legacy_path = os.path.join(data_dir, "proxy_db.db")
+        if not os.path.exists(legacy_path):
+            return
+        if os.path.exists(self._db_path):
+            # 新文件已存在，直接删除旧文件避免重复迁移
+            try:
+                os.remove(legacy_path)
+            except Exception:
+                pass
+            return
+        # 读取旧文件内容，验证是否能正确解密
+        try:
+            with open(legacy_path, "rb") as f:
+                raw_bytes = f.read()
+            if not raw_bytes.strip():
+                # 旧文件为空，直接删除，不迁移
+                os.remove(legacy_path)
+                return
+            content = raw_bytes.decode("utf-8")
+            # 尝试解密验证数据完整性
+            try:
+                _decrypt_json(content)
+            except (ValueError, json.JSONDecodeError):
+                # 旧文件内容无法解密（可能是旧版本格式或损坏），直接删除不迁移
+                logger.warning("[DB] 旧 proxy_db.db 内容无法解密，直接删除不迁移")
+                os.remove(legacy_path)
+                return
+            # 验证通过，复制到新文件
+            import shutil
+            shutil.copy2(legacy_path, self._db_path)
+            logger.info("[DB] 已从 proxy_db.db 迁移到 proxy_db.key")
+            # 删除旧文件
+            os.remove(legacy_path)
+        except Exception as e:
+            logger.warning(f"[DB] 迁移 proxy_db.db 失败: {e}")
+            # 迁移失败也尝试删除旧文件，避免下次重复尝试
+            try:
+                os.remove(legacy_path)
+            except Exception:
+                pass
 
     def _load(self) -> dict:
         """从文件加载数据（带重试，读取失败时重试而非返回空数据）
@@ -1276,45 +1363,39 @@ class ProxyDatabase:
         # 最多重试 3 次，应对并发写入导致的短暂读取失败
         for attempt in range(3):
             try:
-                # 用二进制模式读取，避免对非 ASCII 字节解码失败
-                # （兼容早期版本直接写入二进制密文的格式）
+                # 以二进制模式读取
                 with open(self._db_path, "rb") as f:
                     raw_bytes = f.read()
                 if not raw_bytes.strip():
-                    # 文件为空（可能正在被原子写入），等一下重试
                     import time
                     time.sleep(0.2 * (attempt + 1))
                     continue
-                # 优先按文本 Base64 解析（当前格式）
+                # 以 UTF-8 解码（加密内容是纯 ASCII base64）
                 try:
-                    text = raw_bytes.decode("ascii").strip()
-                    return _decrypt_json(text)
-                except (UnicodeDecodeError, ValueError):
-                    # 不是合法 Base64 文本，尝试直接当作二进制 XXTEA 密文解密
-                    # （兼容早期版本直接写入 _xxtea_encrypt_bytes 输出的格式）
-                    decrypted = _xxtea_decrypt_bytes(raw_bytes, _XXTEA_KEY)
-                    orig_len = int.from_bytes(decrypted[:4], 'little')
-                    raw = decrypted[4:4 + orig_len]
-                    return json.loads(raw.decode("utf-8"))
+                    content = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    # UTF-8 解码失败 → 文件不是文本格式，直接删除重置
+                    logger.warning(f"[DB] proxy_db.key 不是有效的文本文件，已重置")
+                    try:
+                        os.remove(self._db_path)
+                    except Exception:
+                        pass
+                    break
+                # 解密并反序列化
+                return _decrypt_json(content)
             except (json.JSONDecodeError, ValueError) as e:
-                # JSON 解析失败（可能读到半截文件），等一下重试
-                logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
-                import time
-                time.sleep(0.3 * (attempt + 1))
+                # 解密失败或 JSON 解析失败 → 密钥不匹配或文件损坏，直接删除重置
+                logger.warning(f"[DB] proxy_db.key 解密失败，已删除并重置（首次运行或文件损坏属正常现象）: {e}")
+                try:
+                    os.remove(self._db_path)
+                except Exception:
+                    pass
+                break
             except Exception as e:
-                logger.error(f"[DB] proxy_db.db 读取异常: {e}")
+                # 其他异常（可能读到半截文件），等一下重试
+                logger.warning(f"[DB] proxy_db.key 读取异常(尝试 {attempt+1}/3): {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
-        # 重试 3 次都失败，说明文件确实损坏
-        logger.error("[DB] proxy_db.db 读取失败3次，返回空数据（可能需要恢复备份）")
-        # 自动备份损坏的文件，便于后续排查/恢复
-        try:
-            import time as _t
-            backup_path = f"{self._db_path}.corrupt.{int(_t.time())}"
-            os.replace(self._db_path, backup_path)
-            logger.warning(f"[DB] 已将损坏的 proxy_db.db 备份到: {backup_path}")
-        except Exception as backup_err:
-            logger.debug(f"[DB] 备份损坏文件失败: {backup_err}")
         return {
             "upstream_keys": [],
             "sub_api_keys": [],
@@ -1898,7 +1979,7 @@ class ProxyRouter:
 
     路由策略：顺序耗尽 — 优先使用第一个可用 Key，直到该 Key 耗尽（exhausted/disabled），
     再切换到下一个。
-    
+
     性能优化：
     - 使用 requests.Session 连接池，复用TCP+TLS连接
     - 缓存 upstream URL，避免每次请求都读 DB 加锁
@@ -1946,7 +2027,7 @@ class ProxyRouter:
     def _get_session(self, base_url: str) -> requests.Session:
         """获取或创建到指定上游的 Session（连接池复用）"""
         domain = urlparse(base_url).netloc
-        
+
         with self._session_lock:
             if domain not in self._sessions:
                 session = requests.Session()
@@ -2446,25 +2527,25 @@ class ProxyRouter:
 
     def get_upstream_url(self, model: str = "") -> str:
         """获取上游 API base URL（带缓存）
-        
+
         缓存 30 秒，避免每次请求都拿 DB 锁读 settings。
         用户修改 upstream_proxy 设置后最多 30 秒生效。
         """
         now = time.time()
         if self._cached_upstream_url and (now - self._upstream_url_cache_time) < self._UPSTREAM_URL_CACHE_TTL:
             return self._cached_upstream_url
-        
+
         settings = self._db.get_settings()
         custom_proxy = settings.get("upstream_proxy", "")
         if custom_proxy:
             url = custom_proxy
         else:
             url = _get_default_upstream_proxy()
-        
+
         self._cached_upstream_url = url
         self._upstream_url_cache_time = now
         return url
-    
+
     def invalidate_upstream_cache(self):
         """强制刷新 upstream URL 缓存（用户修改设置后调用）"""
         self._cached_upstream_url = ""
@@ -2478,7 +2559,7 @@ class ProxyRouter:
 
     def authenticate_sub_key(self, token: str) -> Optional[dict]:
         """验证子 API Key（带缓存，避免每次请求遍历+加锁）
-        
+
         缓存 token -> sub_key 映射 10 秒，认证从 O(n) + DB锁 变成 O(1) dict 查找。
         """
         now = time.time()
@@ -2494,7 +2575,7 @@ class ProxyRouter:
                         self._cached_sub_keys[sk["api_key"]] = sk
                 self._sub_keys_cache_time = now
                 self._last_sub_key_version = db_version
-        
+
         return self._cached_sub_keys.get(token)
 
     def close_all_sessions(self):
@@ -2511,7 +2592,7 @@ class ProxyRouter:
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器 - OpenAI 兼容接口
-    
+
     性能优化：
     - TCP_NODELAY：禁用 Nagle 算法，SSE 小包立即发送
     - 直接 socket sendall：绕过 BufferedWriter 双重缓冲
@@ -2858,12 +2939,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                                  response_mode: str = "chat",
                                  request_path: str = "/v1/chat/completions"):
         """处理 /v1/chat/completions 请求
-        
+
         自动重试：上游 Key 报错时自动换下一个 Key 重试，
         最多尝试 3 个不同 Key，全部失败才返回错误给客户端。
         """
         t0 = time.time()
-        
+
         # 1. 验证子 Key
         # 关键：不返回 401/403！WorkBuddy 客户端收到 401 会触发重新登录。
         # 用 503 (Service Unavailable) 代替，表示"服务暂时不可用"，不触发认证流程。
