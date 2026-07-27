@@ -104,6 +104,9 @@ jobs:
       - name: Install UPX
         run: brew install upx
 
+      - name: Install icon tools
+        run: pip install Pillow
+
       - name: Fix OpenSSL dependency scan issue
         run: |
           # Nuitka 在 macOS Intel 上扫描 Homebrew OpenSSL 的 libcrypto.dylib 时会报 FATAL 错误
@@ -115,20 +118,45 @@ jobs:
           arch -x86_64 python -c "import platform; print(f'Python arch: {platform.machine()}')"
           file $(arch -x86_64 python -c "import sys; print(sys.executable)")
 
+      - name: Generate .icns icon from .ico
+        run: |
+          # 从 .ico 提取最大尺寸 PNG，然后生成 .icns
+          arch -x86_64 python -c "
+          from PIL import Image
+          img = Image.open('assets/icons/app.ico')
+          img = img.convert('RGBA')
+          img.save('assets/icons/icon-256.png', 'PNG', size=(256, 256))
+          "
+          mkdir -p assets/icons.iconset
+          sips -z 16 16     assets/icons/icon-256.png --out assets/icons.iconset/icon_16x16.png
+          sips -z 32 32     assets/icons/icon-256.png --out assets/icons.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icons/icon-256.png --out assets/icons.iconset/icon_32x32.png
+          sips -z 64 64     assets/icons/icon-256.png --out assets/icons.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icons/icon-256.png --out assets/icons.iconset/icon_128x128.png
+          sips -z 256 256   assets/icons/icon-256.png --out assets/icons.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icons/icon-256.png --out assets/icons.iconset/icon_256x256.png
+          sips -z 512 512   assets/icons/icon-256.png --out assets/icons.iconset/icon_256x256@2x.png
+          iconutil -c icns assets/icons.iconset -o assets/icons/icon.icns
+          ls -la assets/icons/icon.icns
+
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
-          file "dist/BuddyTool"
+          file "dist/BuddyTool.app/Contents/MacOS/BuddyTool"
+
+      - name: Compress app bundle
+        run: |
+          cd dist && zip -r -y BuddyTool-Intel.zip BuddyTool.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-intel-build
           path: |
-            dist/BuddyTool
+            dist/BuddyTool-Intel.zip
 
   build-macos-arm:
     if: ${{ github.event_name == 'push' || inputs.build_macos }}
@@ -159,26 +187,53 @@ jobs:
       - name: Install UPX
         run: brew install upx
 
+      - name: Install icon tools
+        run: pip install Pillow
+
       - name: Verify native ARM Python
         run: |
           test "$(python -c 'import platform; print(platform.machine())')" = "arm64"
 
+      - name: Generate .icns icon from .ico
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('assets/icons/app.ico')
+          img = img.convert('RGBA')
+          img.save('assets/icons/icon-256.png', 'PNG', size=(256, 256))
+          "
+          mkdir -p assets/icons.iconset
+          sips -z 16 16     assets/icons/icon-256.png --out assets/icons.iconset/icon_16x16.png
+          sips -z 32 32     assets/icons/icon-256.png --out assets/icons.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icons/icon-256.png --out assets/icons.iconset/icon_32x32.png
+          sips -z 64 64     assets/icons/icon-256.png --out assets/icons.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icons/icon-256.png --out assets/icons.iconset/icon_128x128.png
+          sips -z 256 256   assets/icons/icon-256.png --out assets/icons.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icons/icon-256.png --out assets/icons.iconset/icon_256x256.png
+          sips -z 512 512   assets/icons/icon-256.png --out assets/icons.iconset/icon_256x256@2x.png
+          iconutil -c icns assets/icons.iconset -o assets/icons/icon.icns
+          ls -la assets/icons/icon.icns
+
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --macos-create-app-bundle --macos-app-icon=assets/icons/icon.icns --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify ARM app architecture
         run: |
-          APP_EXE="dist/BuddyTool"
+          APP_EXE="dist/BuddyTool.app/Contents/MacOS/BuddyTool"
           test -x "$APP_EXE"
           file "$APP_EXE" | grep -q 'arm64'
+
+      - name: Compress app bundle
+        run: |
+          cd dist && zip -r -y BuddyTool-ARM.zip BuddyTool.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm-build
           path: |
-            dist/BuddyTool
+            dist/BuddyTool-ARM.zip
 
   build-linux-cli:
     if: ${{ github.event_name == 'push' || inputs.build_linux }}
@@ -281,15 +336,23 @@ jobs:
             | 平台 | 文件 |
             |------|------|
             | Windows x64 | BuddyTool.exe |
-            | macOS Intel | BuddyTool-Intel |
-            | macOS ARM (M1/M2/M3) | BuddyTool-ARM |
+            | macOS Intel | BuddyTool-Intel.zip |
+            | macOS ARM (M1/M2/M3) | BuddyTool-ARM.zip |
             | Linux CLI | buddy-tool |
 
             ### 安装
 
             **Windows**: 下载 `BuddyTool.exe`，双击运行
 
-            **macOS**: 下载 `BuddyTool`，终端执行 `chmod +x BuddyTool && ./BuddyTool`
+            **macOS**: 下载 `BuddyTool-Intel.zip`（Intel）或 `BuddyTool-ARM.zip`（M1/M2/M3），解压后获得 `BuddyTool.app`，双击运行即可。
+
+            如需使用 CLI：
+            ```bash
+            # Intel
+            BuddyTool.app/Contents/MacOS/BuddyTool help
+            # ARM
+            BuddyTool.app/Contents/MacOS/BuddyTool help
+            ```
 
             **Linux CLI**:
             ```
@@ -306,8 +369,8 @@ jobs:
             ${{ steps.version.outputs.version }}
           files: |
             artifacts/windows-build/BuddyTool.exe
-            artifacts/macos-intel-build/BuddyTool
-            artifacts/macos-arm-build/BuddyTool
+            artifacts/macos-intel-build/BuddyTool-Intel.zip
+            artifacts/macos-arm-build/BuddyTool-ARM.zip
             artifacts/linux-cli-build/buddy-tool
           draft: false
           prerelease: false

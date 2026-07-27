@@ -1,6 +1,9 @@
 """服务端 API 客户端 — 积分查询、卡密兑换等
 
-与 https://buddy.shengdingit.com/api 通信，支持 AES-256-GCM 加密传输 + HMAC-SHA256 签名。
+主域名: https://buddy.shengdingit.com/api
+备用域名: https://api.shengdingit.com/api（主域名网络异常时自动切换）
+
+支持 AES-256-GCM 加密传输 + HMAC-SHA256 签名。
 """
 
 import json
@@ -11,16 +14,18 @@ import hmac
 import hashlib
 import logging
 
-# 全局 Session，启用证书固定
 import requests as _requests_module
-from .ssl_pinning import install_pinning as _install_pinning
-
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from ._obfuscate import get as _obf_get, get_bytes as _obf_bytes
+from .ssl_pinning import install_pinning as _install_pinning
 
 logger = logging.getLogger(__name__)
 
 SERVER_BASE = _obf_get("SERVER_BASE")
+SERVER_BASE_FALLBACK = _obf_get("SERVER_BASE_FALLBACK")
+
+# 当前生效的 API 基址（主域名故障后自动切换到备用域名）
+_active_base = SERVER_BASE
 
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
 _AES_KEY = bytes.fromhex(_obf_get("AES_KEY_HEX"))
@@ -29,12 +34,7 @@ _AES_KEY = bytes.fromhex(_obf_get("AES_KEY_HEX"))
 _API_KEY = _obf_get("API_KEY")
 _HMAC_KEY = _obf_bytes("HMAC_KEY")
 
-# 绕过系统代理，直连服务端
-_NO_PROXY = {"http": None, "https": None}
-
 # 全局 Session，启用证书固定
-from .ssl_pinning import install_pinning as _install_pinning
-
 _session = _requests_module.Session()
 _session.trust_env = False  # 忽略系统代理环境变量
 _install_pinning(_session)
@@ -52,6 +52,69 @@ def _build_signed_headers() -> dict:
         "X-API-Sign": sign,
         "X-Sign-Method": "hmac-sha256",
     }
+
+
+# 触发域名切换的异常类型（网络层错误，非 HTTP 状态码错误）
+import urllib3
+_FAILABLE_EXC = (
+    _requests_module.ConnectionError,
+    _requests_module.Timeout,
+    urllib3.exceptions.SSLError,
+    ConnectionError,
+)
+
+
+def _post_with_failover(path: str, payload: dict, timeout: int = 15) -> dict:
+    """带域名故障转移的 POST 请求
+
+    先用当前活跃域名请求，若发生网络层异常（连接超时/DNS 解析失败/SSL 错误），
+    自动切换到备用域名重试一次。
+
+    Args:
+        path: API 路径（如 /user/credits）
+        payload: 请求体 dict（会自动加密）
+        timeout: 超时秒数
+
+    Returns:
+        解密后的响应 dict，或 {"error": "..."}
+    """
+    global _active_base
+
+    encrypted_body = _encrypt_body(payload)
+    headers = _build_signed_headers()
+
+    bases_to_try = [_active_base]
+    if _active_base == SERVER_BASE:
+        bases_to_try.append(SERVER_BASE_FALLBACK)
+    else:
+        bases_to_try.append(SERVER_BASE)
+
+    last_error = None
+    for base in bases_to_try:
+        url = f"{base}{path}"
+        try:
+            resp = _session.post(
+                url,
+                data=encrypted_body,
+                headers=headers,
+                timeout=timeout,
+            )
+            # 请求成功（网络层），更新活跃域名
+            if base != _active_base:
+                logger.info(f"[Failover] 切换到备用域名: {base}")
+                _active_base = base
+            return _decrypt_body(resp.text)
+        except _FAILABLE_EXC as e:
+            last_error = e
+            logger.warning(f"[Failover] {base} 请求失败: {e}，尝试下一个域名")
+            continue
+        except Exception as e:
+            # 非网络层异常（如解密失败），不切换域名
+            logger.error(f"[Failover] {base} 非网络异常: {e}")
+            return {"error": str(e)}
+
+    logger.error(f"[Failover] 所有域名均不可用，最后错误: {last_error}")
+    return {"error": str(last_error)}
 
 
 def _encrypt_body(data: dict) -> str:
@@ -140,24 +203,7 @@ def get_credits(user_key: str = None) -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/user/credits"
-    payload = {"userKey": key}
-
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=15,
-        )
-        if resp.ok:
-            return _decrypt_body(resp.text)
-        else:
-            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
-    except Exception as e:
-        logger.error(f"查询积分失败: {e}")
-        return {"error": str(e)}
+    return _post_with_failover("/user/credits", {"userKey": key}, timeout=15)
 
 
 def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
@@ -175,27 +221,12 @@ def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/redeem"
-
     payload = {
         "cardKey": card_key,
         "userKey": key,
         "operator": operator,
     }
-
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=30,
-        )
-        # 响应始终加密
-        return _decrypt_body(resp.text)
-    except Exception as e:
-        logger.error(f"卡密兑换失败: {e}")
-        return {"success": False, "message": str(e)}
+    return _post_with_failover("/redeem", payload, timeout=30)
 
 
 def get_buddykey(user_key: str = None) -> dict:
@@ -211,22 +242,7 @@ def get_buddykey(user_key: str = None) -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/buddykey/get"
-
-    payload = {"userKey": key}
-
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=30,
-        )
-        return _decrypt_body(resp.text)
-    except Exception as e:
-        logger.error(f"获取 BuddyKey 失败: {e}")
-        return {"success": False, "message": str(e)}
+    return _post_with_failover("/buddykey/get", {"userKey": key}, timeout=30)
 
 
 def check_version(current_version: str = "", platform: str = "win") -> dict:
@@ -259,27 +275,11 @@ def check_version(current_version: str = "", platform: str = "win") -> dict:
     if platform == "win":
         platform = "win" if _sys.platform == "win32" else ("mac" if _sys.platform == "darwin" else "linux")
 
-    url = f"{SERVER_BASE}/version/check"
     payload = {
         "platform": platform,
         "current_version": current_version,
     }
-
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=15,
-        )
-        if resp.ok:
-            return _decrypt_body(resp.text)
-        else:
-            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
-    except Exception as e:
-        logger.error(f"检查版本失败: {e}")
-        return {"error": str(e)}
+    return _post_with_failover("/version/check", payload, timeout=15)
 
 
 def get_models_list() -> dict:
@@ -289,24 +289,7 @@ def get_models_list() -> dict:
         {"models": [{"id": ..., "name": ..., "maxInputTokens": ..., ...}]}
         失败时返回 {"error": "..."}
     """
-    url = f"{SERVER_BASE}/models/list"
-    payload = {}
-
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=15,
-        )
-        if resp.ok:
-            return _decrypt_body(resp.text)
-        else:
-            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
-    except Exception as e:
-        logger.error(f"获取模型列表失败: {e}")
-        return {"error": str(e)}
+    return _post_with_failover("/models/list", {}, timeout=15)
 
 
 def report_usage(
@@ -332,8 +315,6 @@ def report_usage(
     Returns:
         {"success": true, "device_fingerprint": "...", "credits_used": ..., "balance_before": ..., "balance_after": ..., "report_id": int}
     """
-    url = f"{SERVER_BASE}/usage/report"
-
     payload = {
         "device_fingerprint": device_fingerprint,
         "credits_used": credits_used,
@@ -345,15 +326,4 @@ def report_usage(
     if record_id:
         payload["record_id"] = record_id
 
-    try:
-        encrypted_body = _encrypt_body(payload)
-        resp = _session.post(
-            url,
-            data=encrypted_body,
-            headers=_build_signed_headers(),
-            timeout=15,
-        )
-        return _decrypt_body(resp.text)
-    except Exception as e:
-        logger.error(f"使用量上报失败: {e}")
-        return {"success": False, "message": str(e)}
+    return _post_with_failover("/usage/report", payload, timeout=15)
