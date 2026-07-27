@@ -22,8 +22,8 @@ from ._obfuscate import get as _obf_get
 
 _PINNED_SPKI_HASH = _obf_get("SERVER_SPKI_HASH")
 
-# 需要启用 pinning 的域名（主域名 + 备用域名）
-_PINNED_HOSTS = {"buddy.shengdingit.com", "api.shengdingit.com"}
+# 需要启用 pinning 的域名（仅主域名，备用域名不固定证书）
+_PINNED_HOSTS = {"buddy.shengdingit.com"}
 
 
 def _verify_spki(cert_der: bytes) -> bool:
@@ -85,9 +85,9 @@ class PinnedHTTPAdapter(HTTPAdapter):
 def install_pinning(session):
     """为 requests.Session 安装证书固定
 
-    对 buddy.shengdingit.com 和 api.shengdingit.com 域名的 HTTPS 请求启用 SPKI 验证。
+    仅对 buddy.shengdingit.com 域名的 HTTPS 请求启用 SPKI 验证。
+    备用域名 api.shengdingit.com 不固定证书，使用标准 CA 验证。
     """
     adapter = PinnedHTTPAdapter()
     session.mount("https://buddy.shengdingit.com", adapter)
-    session.mount("https://api.shengdingit.com", adapter)
-    logger.debug("[SSL Pinning] 已为 buddy.shengdingit.com 和 api.shengdingit.com 启用证书固定")
+    logger.debug("[SSL Pinning] 已为 buddy.shengdingit.com 启用证书固定")
