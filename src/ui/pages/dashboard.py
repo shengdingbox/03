@@ -1303,75 +1303,34 @@ class DashboardPage(QWidget):
 
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
 
-        # 模型前缀
-        prefix = self._model_prefix_input.text().strip()
+        # 固定模型列表
+        _FIXED_MODELS = [
+            {"id": "auto",              "name": "Auto",            "maxInputTokens": 128000,  "maxOutputTokens": 8192},
+            {"id": "Hy3",               "name": "Hy3",             "maxInputTokens": 192000,  "maxOutputTokens": 8192},
+            {"id": "GLM-5.2",           "name": "GLM-5.2",         "maxInputTokens": 1000000, "maxOutputTokens": 8192},
+            {"id": "GLM-5.1",           "name": "GLM-5.1",         "maxInputTokens": 200000,  "maxOutputTokens": 8192},
+            {"id": "GLM-5V-Turbo",      "name": "GLM-5V-Turbo",   "maxInputTokens": 200000,  "maxOutputTokens": 8192},
+            {"id": "MiniMax-M3",        "name": "MiniMax-M3",     "maxInputTokens": 512000,  "maxOutputTokens": 8192},
+            {"id": "Kimi-K2.7-Code",    "name": "Kimi-K2.7-Code", "maxInputTokens": 256000,  "maxOutputTokens": 8192},
+            {"id": "Kimi-K2.6",         "name": "Kimi-K2.6",      "maxInputTokens": 256000,  "maxOutputTokens": 8192},
+            {"id": "DeepSeek-V4-Flash", "name": "DeepSeek-V4-Flash", "maxInputTokens": 1000000, "maxOutputTokens": 8192},
+            {"id": "DeepSeek-V4-Pro",   "name": "DeepSeek-V4-Pro","maxInputTokens": 1000000, "maxOutputTokens": 8192},
+        ]
 
-        # 优先从服务端获取模型列表
         models = []
-        try:
-            from ...utils.server_api import get_models_list
-            result = get_models_list()
-            if result and not result.get("error") and result.get("models"):
-                for m in result["models"]:
-                    model_id = m.get("id", "")
-                    if not model_id:
-                        continue
-                    models.append({
-                        "id": f"{prefix}{model_id}" if prefix else model_id,
-                        "name": m.get("name", model_id),
-                        "vendor": "Buddy",
-                        "apiKey": api_key,
-                        "url": url,
-                        "maxInputTokens": m.get("maxInputTokens", 128000),
-                        "maxOutputTokens": m.get("maxOutputTokens", 8192),
-                        "supportsToolCall": m.get("supportsToolCall", True),
-                        "supportsImages": m.get("supportsImages", True),
-                        "supportsReasoning": m.get("supportsReasoning", True),
-                    })
-        except Exception as e:
-            logger.warning(f"从服务端获取模型列表失败: {e}")
-
-        # 服务端获取失败时，使用本地硬编码模型列表作为 fallback
-        if not models:
-            _name_map = {
-                "auto": "自动模式（智能选择）",
-                "deepseek-v4-pro": "DeepSeek V4 Pro",
-                "deepseek-v4-flash": "DeepSeek V4 Flash",
-                "deepseek-v3-2-volc": "DeepSeek V3.2",
-                "deepseek-v3-1": "DeepSeek V3.1",
-                "deepseek-v3-0324": "DeepSeek V3-0324",
-                "deepseek-r1": "DeepSeek R1",
-                "glm-5.2": "GLM-5.2",
-                "glm-5.1": "GLM-5.1",
-                "glm-5.0": "GLM-5.0",
-                "glm-5.0-turbo": "GLM-5.0 Turbo",
-                "glm-5v-turbo": "GLM-5v Turbo",
-                "glm-4.7": "GLM-4.7",
-                "glm-4.6": "GLM-4.6",
-                "minimax-m3": "MiniMax M3",
-                "minimax-m2.7": "MiniMax M2.7",
-                "minimax-m2.5": "MiniMax M2.5",
-                "kimi-k2.6": "Kimi K2.6",
-                "kimi-k2.5": "Kimi K2.5",
-                "kimi-k2.7": "Kimi K2.7",
-                "hy3": "Hy3",
-                "hy3-preview": "Hy3 Preview",
-                "hunyuan-chat": "Hunyuan Chat",
-                "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
-            }
-            for m in SUPPORTED_MODELS:
-                models.append({
-                    "id": f"{prefix}{m}" if prefix else m,
-                    "name": _name_map.get(m, m),
-                    "vendor": "Buddy",
-                    "apiKey": api_key,
-                    "url": url,
-                    "maxInputTokens": MODEL_CONTEXT_LENGTHS.get(m, 128000),
-                    "maxOutputTokens": MODEL_MAX_OUTPUT_TOKENS.get(m, 8192),
-                    "supportsToolCall": True,
-                    "supportsImages": True,
-                    "supportsReasoning": True,
-                })
+        for m in _FIXED_MODELS:
+            models.append({
+                "id": m["id"],
+                "name": m["name"],
+                "vendor": "Buddy",
+                "apiKey": api_key,
+                "url": url,
+                "maxInputTokens": m["maxInputTokens"],
+                "maxOutputTokens": m["maxOutputTokens"],
+                "supportsToolCall": True,
+                "supportsImages": True,
+                "supportsReasoning": True,
+            })
 
         return json.dumps({"models": models}, ensure_ascii=False, indent=2)
 
