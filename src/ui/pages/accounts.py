@@ -39,13 +39,11 @@ def _current_theme_colors() -> dict:
 class AddAccountDialog(QDialog):
     """激活卡密对话框
 
-    输入卡密，调用服务端 /api/redeem 接口激活，
-    激活成功后卡密和返回的 userKey 存到本地。
+    输入卡密，明文 POST 到 http://47.108.236.176:5000/api/activate 激活，
+    成功后服务端返回 buddyKey（作为机器码和上游 api_key）与 faceValue（当前积分）。
     """
 
     account_added = Signal(Account)
-
-    REDEEM_URL = "https://buddy.shengdingit.com/api/redeem"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,14 +58,14 @@ class AddAccountDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         # 说明
-        hint = QLabel("输入卡密激活，激活后卡密将保存到本地")
+        hint = QLabel("输入卡密激活，激活后将获得 BuddyKey 并保存到本地")
         hint.setStyleSheet("color: #718096; font-size: 12px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         # 卡密输入框（单行）
         self._input = QLineEdit()
-        self._input.setPlaceholderText("CK_XXXXX_XXXXX_1000")
+        self._input.setPlaceholderText("BC_XXXXX_XXXXX_1000")
         self._input.setMinimumHeight(36)
         self._input.returnPressed.connect(self._do_redeem)
         layout.addWidget(self._input)
@@ -100,7 +98,7 @@ class AddAccountDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _do_redeem(self):
-        """调用服务端激活卡密"""
+        """明文 POST 到激活接口"""
         card_key = self._input.text().strip()
         if not card_key:
             QMessageBox.warning(self, t("common.warning"), "请输入卡密")
@@ -111,9 +109,8 @@ class AddAccountDialog(QDialog):
         self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
 
         from PySide6.QtCore import QThread, Signal as QSignal
-        from ...utils.server_api import redeem
 
-        class RedeemThread(QThread):
+        class ActivateThread(QThread):
             done = QSignal(object)  # result dict or None
 
             def __init__(self, card_key_str):
@@ -122,12 +119,13 @@ class AddAccountDialog(QDialog):
 
             def run(self):
                 try:
-                    result = redeem(self._card_key)
+                    from ...utils.server_api import activate_card
+                    result = activate_card(self._card_key)
                     self.done.emit(result)
                 except Exception as e:
                     self.done.emit({"success": False, "message": str(e)})
 
-        self._redeem_thread = RedeemThread(card_key)
+        self._redeem_thread = ActivateThread(card_key)
         self._redeem_thread.done.connect(self._on_redeem_done)
         self._redeem_thread.start()
 
@@ -140,56 +138,75 @@ class AddAccountDialog(QDialog):
             self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
             return
 
-        success = result.get("success", False) or result.get("code") == 0
+        success = result.get("success", False)
         if not success:
-            msg = result.get("message") or result.get("msg") or "未知错误"
+            msg = result.get("message") or result.get("msg") or result.get("error") or "未知错误"
             self._status_label.setText(f"❌ 激活失败：{msg}")
             self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
             return
 
-        # 激活成功，获取 userKey
-        user_key = result.get("userKey") or result.get("user_key") or ""
+        # 激活成功，获取 buddyKey 和 faceValue
+        buddy_key = result.get("buddyKey") or result.get("buddy_key") or ""
+        face_value = result.get("faceValue") or result.get("face_value") or 0.0
+        try:
+            face_value = float(face_value)
+        except (TypeError, ValueError):
+            face_value = 0.0
+
         card_key = self._input.text().strip()
         nickname = f"卡密_{secrets.token_hex(4)}"
 
-        # 保存到本地数据库
+        if not buddy_key:
+            self._status_label.setText("❌ 激活失败：服务端未返回 buddyKey")
+            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
+            return
+
+        # 设置机器码（buddyKey 同时作为机器码）
+        try:
+            from ...utils.machine import set_machine_code
+            set_machine_code(buddy_key)
+        except Exception:
+            pass
+
+        # 保存到本地数据库（buddyKey 同时作为 api_key）
         account = Account(
             uid=card_key,
             nickname=nickname,
             platform=Platform.CODEBUDDY,
-            auth_token=user_key or card_key,
+            auth_token=buddy_key,
             domain="www.codebuddy.cn",
             ck=card_key,
-            api_key=user_key or card_key,
+            api_key=buddy_key,
         )
         save_account(account)
 
-        # 同步上游 Key 池
+        # 同步上游 Key 池（buddyKey 作为 api_key，faceValue 作为积分）
         try:
             from ...modules.proxy_server import ProxyDatabase
             proxy_db = ProxyDatabase.get_instance()
             existing_api_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-            api_key = user_key or card_key
-            if api_key and api_key not in existing_api_keys:
+            if buddy_key not in existing_api_keys:
                 proxy_db.add_upstream_key({
                     "key_id": f"ck_{secrets.token_hex(4)}",
-                    "api_key": api_key,
+                    "api_key": buddy_key,
                     "label": nickname,
                     "status": "active",
                     "used_count": 0,
-                    "points": "",
-                    "points_updated_at": "",
+                    "points": str(face_value) if face_value else "",
+                    "points_updated_at": datetime.now().isoformat(),
                     "created_at": datetime.now().isoformat(),
                 })
-        except Exception:
-            pass
+            # 缓存积分余额（供代理转发时余额校验使用）
+            proxy_db.save_cached_credits({"credits": face_value})
+            # 不再写入子 API Key 池 — 系统已取消子Key池概念，只用 buddyKey（机器码）鉴权
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(f"[激活] 同步上游Key失败: {e}", exc_info=True)
 
         # 通知刷新
         self.account_added.emit(account)
 
-        msg = f"✅ 激活成功: {nickname}"
-        if user_key:
-            msg += f"\n🔑 userKey: {user_key[:20]}..."
+        msg = f"✅ 激活成功: {nickname}\n🔑 BuddyKey: {buddy_key[:20]}...\n💎 当前积分: {face_value}"
         self._status_label.setText(msg)
         self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
 

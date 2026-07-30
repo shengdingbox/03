@@ -1,4 +1,4 @@
-# Buddy Tool
+# BuddyToolNew
 
 多平台 IDE 工具管理器 — WorkBuddy / CodeBuddy 批量签到、API Key 代理、积分管理
 
@@ -18,15 +18,15 @@
 
 ### Windows
 
-1. 前往 [Releases](https://github.com/qinchangxv/buddy-tool/releases) 下载 `Buddy-Tool-Windows-x64.zip`
-2. 解压后双击 `Buddy Tool.exe` 运行
+1. 前往 [Releases](https://github.com/qinchangxv/buddytoolnew/releases) 下载 `BuddyToolNew-Windows-x64.zip`
+2. 解压后双击 `BuddyToolNew.exe` 运行
 
 ### macOS
 
-1. 前往 [Releases](https://github.com/qinchangxv/buddy-tool/releases) 下载对应芯片版本的 zip：
-   - **Apple Silicon (M1/M2/M3/M4)**：`Buddy-Tool-macOS-ARM.zip`
-   - **Intel 芯片**：`Buddy-Tool-macOS-Intel.zip`
-2. 解压后将 `Buddy Tool.app` 拖入「应用程序」文件夹
+1. 前往 [Releases](https://github.com/qinchangxv/buddytoolnew/releases) 下载对应芯片版本的 zip：
+   - **Apple Silicon (M1/M2/M3/M4)**：`BuddyToolNew-macOS-ARM.zip`
+   - **Intel 芯片**：`BuddyToolNew-macOS-Intel.zip`
+2. 解压后将 `BuddyToolNew.app` 拖入「应用程序」文件夹
 3. 首次打开如果提示"无法验证开发者"，参考下方 [常见问题排查](#常见问题排查-troubleshooting)
 
 ## 常见问题排查 (Troubleshooting)
@@ -38,7 +38,7 @@
 **命令行修复 (推荐):** 打开终端，执行以下命令：
 
 ```bash
-sudo xattr -rd com.apple.quarantine "/Applications/Buddy Tool.app"
+sudo xattr -rd com.apple.quarantine "/Applications/BuddyToolNew.app"
 ```
 
 > 注意: 如果您修改了应用名称或安装路径，请在命令中相应调整。
@@ -61,8 +61,8 @@ sudo xattr -rd com.apple.quarantine "/Applications/Buddy Tool.app"
 
 ```bash
 # 克隆仓库
-git clone https://github.com/qinchangxv/buddy-tool.git
-cd buddy-tool
+git clone https://github.com/qinchangxv/buddytoolnew.git
+cd buddytoolnew
 
 # 创建虚拟环境
 python -m venv venv
@@ -79,11 +79,8 @@ python src/main.py
 ## 构建
 
 ```bash
-# Windows
-pyinstaller antigravity.spec
-
-# macOS
-pyinstaller antigravity-mac.spec
+# Windows（使用 Nuitka，详见 build.bat）
+venv\Scripts\python.exe -m nuitka --onefile --windows-console-mode=disable --enable-plugin=pyside6 app.py
 ```
 
 ## 技术栈

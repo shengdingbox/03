@@ -1,4 +1,4 @@
-# Buddy Server API 接口文档
+# BuddyToolNew Server API 接口文档
 
 > Base URL: `http://47.83.145.136:8787`
 > 版本: v1.1.0

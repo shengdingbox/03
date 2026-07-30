@@ -278,7 +278,7 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _startup_app_name() -> str:
-        return "BuddyTool"
+        return "BuddyToolNew"
 
     @staticmethod
     def _windows_startup_command() -> str:

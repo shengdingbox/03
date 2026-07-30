@@ -1,4 +1,4 @@
-"""Buddy Tool - 打包入口文件
+"""BuddyToolNew - 打包入口文件
 
 此文件是打包的入口点，将 src 包路径添加到 sys.path 后启动应用。
 直接运行此文件等同于 python -m src.main

@@ -39,6 +39,13 @@ _session = _requests_module.Session()
 _session.trust_env = False  # 忽略系统代理环境变量
 _install_pinning(_session)
 
+# ─── 明文接口（新激活/查分服务，暂不加密） ───
+# 主地址：http://47.108.236.176:5000
+# 接口：POST /api/activate（激活卡密）、GET /api/user/credits（查积分）
+_PLAIN_BASE = "http://47.108.236.176:5000"
+_plain_session = _requests_module.Session()
+_plain_session.trust_env = False  # 忽略系统代理环境变量
+
 
 def _build_signed_headers() -> dict:
     """构建带 HMAC-SHA256 签名的请求头"""
@@ -183,11 +190,51 @@ def _decrypt_body(body_text: str) -> dict:
         return {"error": f"解密失败: {e}"}
 
 
-def get_credits(user_key: str = None) -> dict:
-    """查询用户积分额度（POST 加密接口）
+def activate_card(card_key: str) -> dict:
+    """激活卡密（POST 明文接口）
+
+    调用 http://47.108.236.176:5000/api/activate，明文 JSON 请求。
 
     Args:
-        user_key: 用户密钥（机器码），为空时使用本机动态机器码
+        card_key: 卡密（BC_ 前缀）
+
+    Returns:
+        成功: {"success": true, "buddyKey": "sk-xxx", "cardKey": "BC_xxx", "faceValue": 60.0}
+        失败: {"success": false, "error": "..."} 或 {"error": "..."}
+    """
+    url = f"{_PLAIN_BASE}/api/activate"
+    payload = {"cardKey": card_key}
+    logger.info(f"[activate_card] POST {url} | payload={payload}")
+    try:
+        resp = _plain_session.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        logger.info(f"[activate_card] 响应 HTTP {resp.status_code} | body={resp.text[:500]}")
+        try:
+            data = resp.json()
+        except Exception as e:
+            logger.error(f"[activate_card] 响应 JSON 解析失败: {e}")
+            return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        logger.info(f"[activate_card] 解析结果: {data}")
+        return data if isinstance(data, dict) else {"success": False, "error": "响应格式异常"}
+    except _requests_module.RequestException as e:
+        logger.warning(f"[activate_card] 请求失败: {e}")
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"[activate_card] 异常: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def get_credits(user_key: str = None) -> dict:
+    """查询用户积分额度（GET 明文接口）
+
+    调用 http://47.108.236.176:5000/api/user/credits?userKey=<buddyKey>
+
+    Args:
+        user_key: 机器码（即激活返回的 buddyKey），为空时使用本机已保存的机器码
 
     Returns:
         {
@@ -203,7 +250,31 @@ def get_credits(user_key: str = None) -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    return _post_with_failover("/user/credits", {"userKey": key}, timeout=15)
+    if not key:
+        logger.warning("[get_credits] 机器码为空，未激活，跳过查询")
+        return {"error": "未激活，请先激活卡密获取 BuddyKey"}
+
+    url = f"{_PLAIN_BASE}/api/user/credits"
+    logger.info(f"[get_credits] GET {url} | userKey={key[:12]}...（长度 {len(key)}）")
+    try:
+        resp = _plain_session.get(url, params={"userKey": key}, timeout=15)
+        logger.info(f"[get_credits] 响应 HTTP {resp.status_code} | body={resp.text[:500]}")
+        try:
+            data = resp.json()
+        except Exception as e:
+            logger.error(f"[get_credits] 响应 JSON 解析失败: {e}")
+            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        if isinstance(data, dict) and "credits" in data:
+            logger.info(f"[get_credits] 查询成功: credits={data.get('credits')}, totalUsed={data.get('totalUsed')}")
+            return data
+        logger.warning(f"[get_credits] 响应无 credits 字段: {data}")
+        return {"error": data.get("error") or data.get("message") or "未知错误"}
+    except _requests_module.RequestException as e:
+        logger.warning(f"[get_credits] 请求失败: {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"[get_credits] 异常: {e}")
+        return {"error": str(e)}
 
 
 def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:

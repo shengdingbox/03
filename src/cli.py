@@ -1,4 +1,4 @@
-"""Buddy Tool CLI - 命令行操作入口
+"""BuddyToolNew CLI - 命令行操作入口
 
 在 Linux 或终端环境下使用，不影响 GUI 正常运行。
 用法：
@@ -124,35 +124,10 @@ def cmd_start(args):
     # 检查是否有上游 Key
     upstream_keys = db.get_upstream_keys()
     if not upstream_keys:
-        print("\n⚠️  没有上游 Key，尝试获取 BuddyKey...")
-        from .utils.server_api import get_buddykey
-        user_key = _get_machine_code()
-        result = get_buddykey(user_key=user_key)
-        if result.get("success"):
-            buddy_key = result.get("buddyKey", "")
-            balance = result.get("balance", 0)
-            print(f"✅ 获取 BuddyKey 成功，余额: {balance}")
-
-            # 保存上游 Key 到数据库
-            import secrets as _sec
-            from datetime import datetime as _dt
-            db.add_upstream_key({
-                "key_id": f"bk_{_sec.token_hex(4)}",
-                "api_key": buddy_key,
-                "label": f"BuddyKey (余额 {balance:.1f})",
-                "status": "active",
-                "used_count": 0,
-                "points": str(balance),
-                "points_updated_at": _dt.now().isoformat(),
-                "created_at": _dt.now().isoformat(),
-            })
-
-            # 同步积分到本地缓存（关键！否则请求时会因余额为 0 被拒绝）
-            db.save_cached_credits({"credits": float(balance)})
-        else:
-            err = result.get("error") or result.get("message") or "未知错误"
-            print(f"❌ 获取 BuddyKey 失败: {err}")
-            return 1
+        # BuddyKey 现通过激活卡密获取，启动时不再自动获取
+        print("\n❌ 没有上游 Key，请先激活卡密获取 BuddyKey")
+        print("   运行: python -m src.cli redeem <卡密>")
+        return 1
 
     server = ProxyServer(host=host, port=port, mode="local")
 
@@ -376,7 +351,7 @@ def main():
     )
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
-        print("Buddy Tool CLI - 命令行操作")
+        print("BuddyToolNew CLI - 命令行操作")
         print(f"\n用法: python -m src.cli <command> [args]")
         print(f"\n命令:")
         for cmd, (desc, _) in COMMANDS.items():

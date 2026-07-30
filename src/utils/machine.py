@@ -1,9 +1,11 @@
-"""机器码生成工具 — 基于硬件信息生成唯一机器码
+"""机器码与硬件特征工具
 
-持久化策略：
-- 首次启动时计算机器码并保存到 proxy_db.key 的 settings.machine_code 字段
-- 后续启动优先从 proxy_db.key 读取，避免因硬件信息读取顺序变化导致机器码漂移
-- 这样换网络、网卡变化都不会影响已绑定的机器码
+本模块提供两类能力：
+1. 硬件特征采集（_get_disk_serial / _get_cpu_id / _get_hostname）— 仅供 proxy_db.key
+   的本地数据库加密密钥派生使用（见 proxy_server._get_local_db_key），不得删除。
+2. 机器码读写（get_machine_code / set_machine_code / get_short_machine_code）— 机器码
+   不再基于硬件计算，而是激活卡密时由服务端返回的 buddyKey 充当，持久化在
+   proxy_db.key 的 settings.machine_code 字段。未激活时返回空字符串。
 """
 
 import hashlib
@@ -111,11 +113,14 @@ def _to_base62(num: int) -> str:
     return "".join(reversed(result))
 
 
+# ─── 机器码读写（基于激活的 buddyKey，不再硬件计算） ───
+
+# 内存缓存，避免重复 IO
 _cached_machine_code = None
 
 
 def _load_cached_machine_code() -> str:
-    """从 proxy_db.key 读取已保存的机器码（如果有）"""
+    """从 proxy_db.key 读取已保存的机器码（即激活时存入的 buddyKey）"""
     try:
         # 延迟导入，避免循环依赖
         from ..modules.proxy_server import ProxyDatabase
@@ -128,7 +133,7 @@ def _load_cached_machine_code() -> str:
 
 
 def _persist_machine_code(code: str) -> None:
-    """将机器码保存到 proxy_db.key"""
+    """将机器码保存到 proxy_db.key 的 settings.machine_code 字段"""
     try:
         from ..modules.proxy_server import ProxyDatabase
         db = ProxyDatabase.get_instance()
@@ -137,55 +142,36 @@ def _persist_machine_code(code: str) -> None:
         logger.debug(f"保存机器码到 proxy_db.key 失败: {e}")
 
 
-def _compute_machine_code() -> str:
-    """根据硬件信息计算机器码（不含 MAC 地址，避免网络变化影响）
+def set_machine_code(code: str) -> None:
+    """设置机器码（激活卡密成功后调用，code 为服务端返回的 buddyKey）
 
-    综合磁盘序列号、CPU ID、主机名，通过 SHA256 哈希后 Base62 编码。
+    同时更新内存缓存和持久化存储。
     """
-    parts = [
-        _get_disk_serial(),
-        _get_cpu_id(),
-        _get_hostname(),
-    ]
-    raw = "buddy|" + "|".join(parts)
-    sha256_hex = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    encoded = _to_base62(int(sha256_hex, 16))
-    return f"buddy_{encoded}"
+    global _cached_machine_code
+    _cached_machine_code = code or ""
+    if code:
+        _persist_machine_code(code)
 
 
 def get_machine_code() -> str:
-    """生成当前机器的唯一机器码
+    """获取当前机器码
 
-    持久化逻辑：
-    1. 优先从 proxy_db.key 读取已保存的机器码
-    2. 若无记录，则基于硬件信息重新计算
-    3. 计算后立即保存到 proxy_db.key，后续启动直接复用
-
-    这样换网络、网卡变化都不会影响已绑定的机器码。
-    首次计算后缓存到内存，避免重复 IO。
+    机器码 = 激活卡密时服务端返回的 buddyKey，持久化在 proxy_db.key。
+    未激活时返回空字符串。
 
     Returns:
-        Base62 编码的机器码字符串（约 43 字符，前缀 buddy_）
+        机器码字符串（buddyKey），未激活时为 ""
     """
     global _cached_machine_code
     if _cached_machine_code is not None:
         return _cached_machine_code
 
-    # 1. 尝试从 proxy_db.key 读取
+    # 从 proxy_db.key 读取
     cached = _load_cached_machine_code()
-    if cached:
-        _cached_machine_code = cached
-        return cached
-
-    # 2. 重新计算
-    code = _compute_machine_code()
-    _cached_machine_code = code
-
-    # 3. 保存到 proxy_db.key
-    _persist_machine_code(code)
-    return code
+    _cached_machine_code = cached
+    return cached
 
 
 def get_short_machine_code() -> str:
     """生成短机器码（取前 16 位，便于显示）"""
-    return get_machine_code()[:16]
+    return (get_machine_code() or "")[:16]

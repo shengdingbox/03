@@ -8,7 +8,7 @@
 5. models.json 两种格式（WorkBuddy 裸数组 / CodeBuddy {"models": [...]}）读写正确
 
 运行：
-    cd F:/自制工具/antigravity-tools
+    cd F:/自制工具/buddytoolnew
     python -m unittest tests.test_model_config -v
 """
 

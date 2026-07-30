@@ -5,7 +5,7 @@
 - 子 API Key 管理与鉴权
 - 请求路由（顺序耗尽策略：一个 Key 用完再切下一个）
 - 支持 OpenAI 兼容接口转发（/v1/chat/completions, /v1/models 等）
-- 上游代理默认 https://copilot.tencent.com/v2（加密隐藏，用户不可见）
+- 上游默认 http://47.108.236.176/v1（明文，透传请求和响应）
 - 限流、自动切换耗尽 Key
 """
 
@@ -35,22 +35,6 @@ from ..utils.store import load_setting
 logger = logging.getLogger(__name__)
 
 
-def _inject_credits_to_workbuddy(credits: float):
-    """将积分注入到 WorkBuddy（后台调用，失败不抛异常）
-
-    通过 CDP 调试端口把积分叠加值注入 WorkBuddy 前端。
-    WorkBuddy 需带 --remote-debugging-port=9222 启动。
-    """
-    try:
-        from ..utils.inject_credits import inject_credits_to_workbuddy as _do_inject
-        logger.info(f"[WorkBuddy注入] 开始注入积分: {credits:.2f}")
-        success = _do_inject(credits)
-        if success:
-            logger.info(f"[WorkBuddy注入] 积分 {credits:.2f} 注入成功")
-        else:
-            logger.warning(f"[WorkBuddy注入] 注入失败（返回 False），WorkBuddy 可能未启动或未带调试端口")
-    except Exception as e:
-        logger.warning(f"[WorkBuddy注入] 异常: {e}", exc_info=True)
 
 # ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
 # 用于 proxy_db.key 文件内容加密（AES-256-GCM + 机器绑定密钥）
@@ -122,7 +106,7 @@ def _get_local_db_key() -> bytes:
 
 
 # 文件头标记，区分新旧格式
-_DB_MAGIC_V2 = b"BTG1"  # Buddy Tool GCM v1
+_DB_MAGIC_V2 = b"BTG1"  # BuddyToolNew GCM v1
 
 
 def _encrypt_json(data) -> str:
@@ -181,17 +165,13 @@ def _decrypt_json(text: str):
         raise ValueError("解密后数据不是有效 UTF-8，可能密钥不匹配或文件损坏")
 
 
-# ─── 上游代理地址（加密隐藏，用户在UI上看不到）───
-_OBFUSCATED_PROXY = base64.b64encode(
-    b"aHR0cHM6Ly9jb3BpbG90LnRlbmNlbnQuY29tL3Yy"
-).decode()  # 双重编码，增加隐蔽性
+# ─── 上游 API 地址（新：明文，新中转服务）───
+DEFAULT_UPSTREAM_URL = "http://47.108.236.176/v1"
 
 
 def _get_default_upstream_proxy() -> str:
-    """获取默认上游代理地址（解密还原）"""
-    return base64.b64decode(
-        base64.b64decode(_OBFUSCATED_PROXY)
-    ).decode("utf-8")
+    """获取默认上游 API 地址"""
+    return DEFAULT_UPSTREAM_URL
 
 
 # ─── 支持的模型列表（已实测验证可用）───
@@ -857,6 +837,7 @@ def _load_system_prompt_sensitive_replacements() -> list[dict]:
         return []
 
     if enabled != "True":
+        logger.debug(f"[系统提示词敏感信息] 功能未启用 (enabled={enabled})")
         return []
 
     try:
@@ -867,6 +848,8 @@ def _load_system_prompt_sensitive_replacements() -> list[dict]:
 
     if not isinstance(pairs, list):
         return []
+
+    logger.info(f"[系统提示词敏感信息] 已加载 {len(pairs)} 条替换规则: {pairs}")
 
     replacements = []
     for pair in pairs:
@@ -899,9 +882,13 @@ def _compile_system_prompt_replacement_pattern(replacements: list[dict]):
     return pattern, values
 
 
-def _replace_system_prompt_sensitive_words(messages: list) -> int:
+def _replace_sensitive_words_in_obj(obj) -> int:
+    """递归遍历整个对象，替换所有字符串中的敏感词
+
+    处理范围：messages、tools、tool_choice 等 body 中所有层级的字符串值。
+    """
     replacements = _load_system_prompt_sensitive_replacements()
-    if not replacements or not isinstance(messages, list):
+    if not replacements:
         return 0
 
     pattern, values = _compile_system_prompt_replacement_pattern(replacements)
@@ -910,38 +897,33 @@ def _replace_system_prompt_sensitive_words(messages: list) -> int:
 
     replaced_count = 0
 
-    def _replace_text(text: str) -> tuple[str, int]:
-        count = 0
+    def _replace_in_str(text: str) -> str:
+        nonlocal replaced_count
 
         def _replace_match(match):
-            nonlocal count
-            count += 1
+            nonlocal replaced_count
+            replaced_count += 1
             return values.get(match.group(0), "")
 
-        return pattern.sub(_replace_match, text), count
+        return pattern.sub(_replace_match, text)
 
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "system":
-            continue
+    def _replace_recursive(o):
+        if isinstance(o, str):
+            return _replace_in_str(o)
+        if isinstance(o, dict):
+            for k, v in o.items():
+                o[k] = _replace_recursive(v)
+            return o
+        if isinstance(o, list):
+            for i, item in enumerate(o):
+                o[i] = _replace_recursive(item)
+            return o
+        return o
 
-        content = msg.get("content")
-        if isinstance(content, str):
-            new_content, count = _replace_text(content)
-            if count:
-                msg["content"] = new_content
-                replaced_count += count
-        elif isinstance(content, list):
-            for part in content:
-                if not isinstance(part, dict) or part.get("type") != "text":
-                    continue
-                text = part.get("text")
-                if not isinstance(text, str):
-                    continue
-                new_text, count = _replace_text(text)
-                if count:
-                    part["text"] = new_text
-                    replaced_count += count
+    _replace_recursive(obj)
 
+    if replaced_count:
+        logger.info(f"[敏感词替换] 全局替换完成，共替换 {replaced_count} 处")
     return replaced_count
 
 
@@ -957,7 +939,8 @@ def _build_workbuddy_relay_body(client_body: dict) -> tuple[dict, dict]:
     body = copy.deepcopy(client_body)
     body["model"] = body.get("model") or "auto"
     body["messages"] = copy.deepcopy(client_body.get("messages", []))
-    sensitive_replaced = _replace_system_prompt_sensitive_words(body["messages"])
+    # 全局递归替换整个 body（messages + tools + tool_choice 等所有字段）
+    sensitive_replaced = _replace_sensitive_words_in_obj(body)
     body["stream"] = True
 
     dropped_fields = []
@@ -1181,10 +1164,9 @@ def _responses_stream_events_from_chat_chunk(chunk_str: str, response_id: str,
     return events
 
 
-# 上游 API 路径（copilot.tencent.com/v2 使用 /chat/completions，不是 /v1/chat/completions）
+# 上游 API 路径（新上游 http://47.108.236.176/v1 使用 /chat/completions）
 UPSTREAM_CHAT_PATH = "/chat/completions"
-UPSTREAM_MODELS_PATH = "/v1/models"
-BILLING_QUERY_PATH = "/v2/billing/meter/get-user-resource"
+UPSTREAM_MODELS_PATH = "/models"
 
 
 @dataclass
@@ -1288,7 +1270,7 @@ class ProxyDatabase:
     def __init__(self, data_dir: str = ""):
         import os
         if not data_dir:
-            data_dir = os.path.expanduser("~/.buddy-tool")
+            data_dir = os.path.expanduser("~/.buddytoolnew")
         os.makedirs(data_dir, exist_ok=True)
         self._db_path = os.path.join(data_dir, "proxy_db.key")
         # 迁移旧的 proxy_db.db → proxy_db.key（仅首次执行）
@@ -1800,79 +1782,6 @@ class ProxyDatabase:
         result["credits"] = round(result["credits"], 4)
         return result
 
-    _points_query_timestamps: dict = {}  # {key_id: last_query_epoch}
-
-    def refresh_key_points_if_needed(self, key_id: str):
-        """请求完成后异步查分，限频 1 分钟/次。查到后调用 sync_quota_to_key 更新积分。"""
-        import time as _time
-        now = _time.time()
-        last = ProxyDatabase._points_query_timestamps.get(key_id, 0)
-        if now - last < 300:
-            return  # 5 分钟内已查过，跳过
-
-        ProxyDatabase._points_query_timestamps[key_id] = now
-
-        # 找到该 Key 的 api_key
-        with self._lock:
-            api_key = None
-            for k in self._data.get("upstream_keys", []):
-                if k.get("key_id") == key_id:
-                    api_key = k.get("api_key", "")
-                    break
-        if not api_key:
-            return
-
-        # 异步查分
-        def _do_query():
-            try:
-                import requests
-                url = f"https://copilot.tencent.com{BILLING_QUERY_PATH}"
-                resp = requests.post(url, json={}, headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                }, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # 兼容两种响应结构：
-                    # 旧格式: {"accounts": [...]} (顶层)
-                    # 新格式: {"data":{"Response":{"Data":{"Accounts": [...]}}}}
-                    accounts = data.get("accounts", [])
-                    if not accounts:
-                        # 尝试新格式
-                        try:
-                            accounts = data["data"]["Response"]["Data"]["Accounts"]
-                        except (KeyError, TypeError):
-                            accounts = []
-                    # 关键防护：accounts 为空说明上游返回了异常数据（维护/限流/格式变更），
-                    # 不能当成 0 分处理，否则会把所有 Key 全部误禁用
-                    if not accounts:
-                        logger.warning(f"[自动查分] Key {key_id} 查分返回空 accounts，跳过更新（不误禁用）")
-                        return
-                    total_remain = 0.0
-                    total_credits = 0.0
-                    pkgs = []
-                    for acc in accounts:
-                        # 兼容新旧字段名
-                        remain = float(acc.get("cycle_remain", acc.get("CycleCapacityRemain", acc.get("CapacityRemain", 0))))
-                        total = float(acc.get("cycle_total", acc.get("CycleCapacitySize", acc.get("CapacitySize", 0))))
-                        total_remain += remain
-                        total_credits += total
-                        pkgs.append({
-                            "cycle_remain": remain,
-                            "cycle_end": acc.get("cycle_end", acc.get("CycleEndTime", "")),
-                            "package_name": acc.get("package_name", acc.get("PackageName", "")),
-                            "package_type": acc.get("package_type", acc.get("PackageType", "")),
-                        })
-                    self.sync_quota_to_key(api_key, total_remain, total_credits, packages=pkgs)
-                    logger.info(f"[自动查分] Key {key_id} 积分更新: {total_remain:.0f}/{total_credits:.0f}")
-                else:
-                    logger.warning(f"[自动查分] Key {key_id} 查分返回非200: status={resp.status_code}, body={resp.text[:200]}")
-            except Exception as e:
-                logger.debug(f"[自动查分] Key {key_id} 查分失败: {e}")
-
-        import threading
-        threading.Thread(target=_do_query, daemon=True).start()
-
     def increment_sub_api_key_stats(self, key_id: str, prompt_tokens: int = 0,
                                      completion_tokens: int = 0, total_tokens: int = 0,
                                      cached_tokens: int = 0, credits: float = 0.0):
@@ -2039,7 +1948,7 @@ class ProxyRouter:
                 )
                 session.mount("https://", adapter)
                 session.mount("http://", adapter)
-                # 重要：绕过系统代理（Clash/V2Ray），直连上游 copilot.tencent.com
+                # 重要：绕过系统代理（Clash/V2Ray），直连上游
                 # 否则请求会经过 Clash 再转发，可能造成 400 环路错误
                 session.trust_env = False
                 session.proxies = {"http": None, "https": None}
@@ -2364,10 +2273,9 @@ class ProxyRouter:
         self._health_check_stop.set()
 
     def _health_check_loop(self):
-        """后台健康检测循环：每 5 分钟 + 随机抖动检测所有 active/cooldown Key
+        """后台健康检测循环：每 5 分钟 + 随机抖动检测所有 cooldown Key
 
-        GET https://copilot.tencent.com/v2/v1/models 带 Bearer key，返回 200 即健康。
-        失败标记 Key 为 cooldown（不是 disabled，让它能恢复）。
+        用轻量 chat 请求探测 cooldown 状态的 Key 能否恢复为 active。
         """
         logger.info("[健康检测] 后台检测线程启动")
         while not self._health_check_stop.is_set():
@@ -2628,54 +2536,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         """覆盖默认日志"""
         logger.debug(f"Proxy: {format % args}")
 
-    def _refresh_buddykey(self) -> str:
-        """获取新的 BuddyKey 并替换当前上游 Key
-
-        Returns:
-            新的 api_key，失败返回空字符串
-        """
-        try:
-            from ..utils.server_api import get_buddykey
-            import secrets as _sec
-            from datetime import datetime
-
-            result = get_buddykey()
-            if not result or not result.get("success"):
-                err = (result or {}).get("error", "未知错误")
-                logger.warning(f"[BuddyKey刷新] 获取失败: {err}")
-                return ""
-
-            buddy_key = result.get("buddyKey", "")
-            if not buddy_key:
-                logger.warning("[BuddyKey刷新] 服务端未返回 buddyKey")
-                return ""
-
-            db = self.db
-            # 清除旧的上游 key
-            for k in db.get_upstream_keys():
-                db.delete_upstream_key(k.get("key_id", ""))
-
-            # 添加新的上游 key
-            db.add_upstream_key({
-                "key_id": f"bk_{_sec.token_hex(4)}",
-                "api_key": buddy_key,
-                "label": f"BuddyKey (余额 {result.get('balance', 0):.1f})",
-                "status": "active",
-                "used_count": 0,
-                "points": str(result.get("balance", 0)),
-                "points_updated_at": datetime.now().isoformat(),
-                "created_at": datetime.now().isoformat(),
-            })
-
-            # 刷新路由器缓存
-            self.router.invalidate_upstream_cache()
-
-            logger.info(f"[BuddyKey刷新] 已替换上游 Key，新余额: {result.get('balance', 0):.1f}")
-            return buddy_key
-        except Exception as e:
-            logger.error(f"[BuddyKey刷新] 异常: {e}")
-            return ""
-
     def _add_log(self, event: str, sub_key: dict = None, upstream_key: dict = None,
                  model: str = "", duration_ms: int = 0, error: str = "",
                  prompt_tokens: int = 0, completion_tokens: int = 0,
@@ -2748,21 +2608,19 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authenticate(self, quiet: bool = False) -> Optional[dict]:
-        """验证子 API Key，返回 sub_key dict 或 None
+        """验证 API Key — 只接受 buddyKey（机器码）
 
-        本地模式：透传模式 — 当 token 不匹配任何子Key时，自动创建一个虚拟子Key，
-        让请求可以正常转发。这是为了兼容 WorkBuddy 客户端的行为——
-        WorkBuddy 会用自己的 JWT token 发请求，而不是用户配置的 sk-xxx 子Key。
-
-        开放模式：强制子Key鉴权 — 不匹配任何子Key的请求直接拒绝，
-        因为开放模式下网络上的任何人都可以连接，必须用子Key控制访问。
+        取消子Key池概念，整个系统只有一个 key：服务器返回的 buddyKey。
+        客户端请求携带的 Bearer token 必须等于 buddyKey 才能通过认证。
 
         Args:
             quiet: 静默模式，不打印 warning（用于非核心端点）
 
         Returns:
-            sub_key dict（可能是真实子Key或虚拟透传子Key），或者 None（认证失败时）
+            认证成功返回 sub_key dict（虚拟，仅用于日志统计），失败返回 None
         """
+        from ..utils.machine import get_machine_code
+
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             if not quiet:
@@ -2770,43 +2628,38 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.warning(f"[认证] 缺少 Bearer token, path={self.path}, client={client_ip}")
             return None
         token = auth[7:].strip()
-        # 使用缓存认证，O(1) dict 查找，不每次拿 DB 锁遍历
-        result = self.router.authenticate_sub_key(token)
-        if result:
-            return result
+        buddy_key = get_machine_code()
 
-        # Generated proxy keys are authoritative. If a sk-* key is not found,
-        # it was deleted/disabled or never existed, so local passthrough must
-        # not silently grant access.
-        if token.startswith("sk-"):
+        if not buddy_key:
             if not quiet:
-                client_ip = self._get_client_ip()
-                logger.warning(f"[认证] 子Key不存在或已删除, token=...{token[-6:] if len(token) > 6 else token}, client={client_ip}")
+                logger.warning("[认证] 未激活，buddyKey 为空，拒绝所有请求")
             return None
 
-        # 开放模式：不匹配子Key → 直接拒绝，不创建虚拟透传子Key
-        if self.server_mode == "open":
+        if token == buddy_key:
             if not quiet:
-                client_ip = self._get_client_ip()
-                logger.warning(f"[认证] 开放模式下 token=...{token[-6:] if len(token) > 6 else token} 不匹配子Key，拒绝访问, client={client_ip}")
-            return None
+                logger.info(f"[认证] 通过, token={token[:12]}...（buddyKey）")
+            # 返回虚拟 sub_key，仅用于日志统计
+            return {
+                "key_id": "_buddykey_",
+                "api_key": buddy_key,
+                "label": "BuddyKey",
+                "is_active": True,
+                "allowed_models": [],
+                "allowed_key_ids": [],
+                "max_usage": 0,
+                "used_count": 0,
+                "rate_limit_rpm": 1000,
+                "key_mode": 1,
+            }
 
-        # 本地模式透传：token 不匹配任何子Key，但请求带了 Bearer token
-        # WorkBuddy 自己的 JWT token → 创建通用透传子Key（使用全部上游Key）
+        # token 不匹配 buddyKey
         if not quiet:
-            logger.info(f"[透传] token=...{token[-6:] if len(token) > 6 else token} 不匹配子Key，启用透传模式")
-        return {
-            "key_id": "_passthrough_",
-            "api_key": token,  # 保留原始token，但不用于上游认证
-            "label": f"透传(...{token[-6:] if len(token) > 6 else token})",
-            "is_active": True,
-            "allowed_models": [],  # 空=全部模型
-            "allowed_key_ids": [],  # 空=全部上游Key
-            "max_usage": 0,
-            "used_count": 0,
-            "rate_limit_rpm": 1000,
-            "key_mode": 1,
-        }
+            client_ip = self._get_client_ip()
+            logger.warning(
+                f"[认证] token 不匹配 buddyKey, token={token[:12]}...(长度 {len(token)}), "
+                f"buddyKey={buddy_key[:12]}...(长度 {len(buddy_key)}), client={client_ip}"
+            )
+        return None
 
     def do_GET(self):
         """GET 请求处理"""
@@ -2827,13 +2680,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         # /v1/models - 返回可用模型列表
         if path == "/v1/models":
             sub_key = self._authenticate(quiet=True)
-            # 开放模式：必须有子Key才能获取模型列表
-            if self.server_mode == "open" and not sub_key:
+            if not sub_key:
                 client_ip = self._get_client_ip()
-                logger.warning(f"[认证] /v1/models 开放模式无子Key，拒绝, client={client_ip}")
+                logger.warning(f"[认证] /v1/models 鉴权失败, client={client_ip}")
                 self._send_json(401, {"error": {"message": "Invalid API key", "type": "authentication_error"}})
                 return
-            # 本地模式透传：无论是真实子Key还是透传模式，都返回完整模型列表
+            # 鉴权通过：返回完整模型列表
             if not sub_key:
                 # 没有 Bearer token at all，仍然返回完整列表（不弹登录）
                 logger.info(f"[透传] /v1/models 无Bearer token，返回全部模型")
@@ -2950,26 +2802,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         # 用 503 (Service Unavailable) 代替，表示"服务暂时不可用"，不触发认证流程。
         sub_key = self._authenticate()
         if not sub_key:
-            # 开放模式：返回标准 401，客户端不是 WorkBuddy，不会触发重登录
-            if self.server_mode == "open":
-                client_ip = self._get_client_ip()
-                error_detail = "无效的 API Key"
-                logger.warning(f"[认证] {error_detail}, client={client_ip}")
-                self._add_log(event="auth_fail", error=error_detail, request_path="/v1/chat/completions")
-                self._send_json(401, {"error": {"message": "Invalid API key", "type": "authentication_error"}})
-                return
-            # 本地模式：不返回 401/403！WorkBuddy 客户端收到 401 会触发重新登录。
-            # 用 503 (Service Unavailable) 代替，表示"服务暂时不可用"，不触发认证流程。
-            error_detail = "请求缺少 Bearer token"
-            logger.warning(f"[认证] {error_detail}，返回503")
+            # 鉴权失败：返回 401（只有一个 key，不匹配就是无效）
+            client_ip = self._get_client_ip()
+            error_detail = "无效的 API Key"
+            logger.warning(f"[认证] {error_detail}, client={client_ip}")
             self._add_log(event="auth_fail", error=error_detail, request_path="/v1/chat/completions")
-            self._send_json(503, {"error": {"message": "Service temporarily unavailable", "type": "server_error"}})
+            self._send_json(401, {"error": {"message": "Invalid API key", "type": "authentication_error"}})
             return
 
-        is_passthrough = sub_key.get("key_id") == "_passthrough_"
+        is_passthrough = sub_key.get("key_id") == "_buddykey_"
         if is_passthrough:
-            logger.info(f"[透传] chat请求使用透传模式，自动选上游Key")
-            self._add_log(event="request", sub_key=sub_key, error="透传模式:自动选上游Key", request_path="/v1/chat/completions")
+            logger.info(f"[认证] chat请求使用 buddyKey 鉴权")
 
         # 2. 检查子 Key 状态（透传模式跳过）
         if not is_passthrough:
@@ -3028,53 +2871,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             model = aliased_model
             request_data["model"] = model
         # 与服务器端 chat.py 一致：messages 少于 2 条时补 system 消息
-        # 上游 copilot.tencent.com 要求至少 2 条 message，否则返回 400
         messages = request_data.get("messages", [])
-        # [v1.6.1-fix] 严格校验 messages 类型，防止字符串/None/dict 导致后续 .insert() 崩溃
+        # 严格校验 messages 类型，防止字符串/None/dict 导致后续 .insert() 崩溃
         if not isinstance(messages, list) or not messages:
             self._send_json(400, {"error": {"message": "messages is required and must be a non-empty array", "type": "invalid_request"}})
-            return
-
-        # 检查积分包余额（本地缓存），余额 <= 0 时拒绝请求
-        cached_balance = self.db.get_cached_credits_balance()
-        if cached_balance <= 0:
-            logger.warning(f"[额度] 积分包余额不足，拒绝请求 (balance={cached_balance})")
-            self._send_json(429, {"error": {"message": "积分包余额不足，请充值后再使用", "type": "quota_exceeded"}})
             return
         if len(messages) < 2:
             messages.insert(0, {"role": "system", "content": "You are a helpful assistant."})
             request_data["messages"] = messages
-
-        # [v1.6.1-fix] 旧的图片拦截逻辑已移除（模型能力检查 + 历史图片剥离）
-        # 原因：新的白名单制 + 图片格式归一化已覆盖所有场景，旧逻辑多余且可能误拦截
-        # [ROLLBACK] 恢复方法：把下面的代码取消注释
-        # latest_user_idx = _latest_user_message_index(messages)
-        # latest_user_has_image = latest_user_idx >= 0 and _message_has_image(messages[latest_user_idx])
-        # image_stats = _detect_multimodal_images(request_data)
-        # history_strip_stats = {"stripped_images": 0}
-        # if model in IMAGE_UNSUPPORTED_TEXT_MODELS and image_stats["image_count"] and not latest_user_has_image:
-        #     history_strip_stats = _strip_historical_images_for_text_model(request_data, latest_user_idx)
-        #     image_stats = _detect_multimodal_images(request_data)
-        #     if history_strip_stats["stripped_images"]:
-        #         logger.info(
-        #             f"[历史图片省略] model={model}, stripped_images={history_strip_stats['stripped_images']}"
-        #         )
-        # if latest_user_has_image and model in IMAGE_UNSUPPORTED_TEXT_MODELS:
-        #     error_detail = f"{model} 不支持图片输入，如需图片识别请切换到 glm-5v-turbo 模型"
-        #     logger.warning(
-        #         f"[图片拒绝] model={model}, images={image_stats['image_count']}, "
-        #         f"data_uri={image_stats['data_uri_count']}, max_image_chars={image_stats['max_image_chars']}"
-        #     )
-        #     self._add_log(event="error", sub_key=sub_key, model=model, error=error_detail, request_path="/v1/chat/completions")
-        #     self._send_json(400, {
-        #         "error": {
-        #             "message": error_detail,
-        #             "type": "unsupported_multimodal",
-        #             "code": "model_image_not_supported",
-        #         }
-        #     })
-        #     return
-        # ── 旧逻辑结束 ──
 
         # 4. 检查模型是否允许（透传模式跳过）
         if not is_passthrough:
@@ -3144,62 +2948,25 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.router.increment_concurrent(key_id)
 
             try:
-                # ─── v1.6.6 WorkBuddy Relay：保留客户端 body，只替换上游 Key ───
+                # ─── 透传模式：保留客户端原始 body，用上游 Key 鉴权 ───
                 upstream_api_key = upstream_key.get("api_key", "")
                 req_headers = _build_workbuddy_relay_headers(upstream_api_key)
                 client_wants_stream = request_data.get("stream", False)
-                upstream_request_data, build_meta = _build_workbuddy_relay_body(request_data)
-                sensitive_replaced = build_meta.get("system_prompt_sensitive_replaced", 0)
-                if sensitive_replaced:
-                    self._add_log(
-                        event="sensitive_replace",
-                        sub_key=sub_key,
-                        upstream_key=upstream_key,
-                        model=model,
-                        error=f"系统提示词敏感信息替换 {sensitive_replaced} 处",
-                        request_path="/v1/chat/completions",
-                    )
+                # 透传：直接用客户端请求体，不做消息体转换
+                upstream_request_data = request_data
 
-                if (
-                    build_meta["removed_null_fields"]
-                    or build_meta["translated_fields"]
-                    or build_meta["dropped_fields"]
-                    or build_meta["history_images_replaced"]
-                    or build_meta["normalized_images"]
-                    or build_meta["unsupported_inline_images_removed"]
-                ):
-                    logger.info(
-                        f"[v1.6.6] WorkBuddy Relay 调整字段: "
-                        f"dropped={build_meta['dropped_fields']}; "
-                        f"removed_null={build_meta['removed_null_fields']}; "
-                        f"translated={build_meta['translated_fields']}; "
-                        f"history_images_replaced={build_meta['history_images_replaced']}; "
-                        f"normalized_images={build_meta['normalized_images']}; "
-                        f"unsupported_inline_images_removed={build_meta['unsupported_inline_images_removed']}"
-                    )
-
-                image_stats = _detect_multimodal_images(upstream_request_data)
-
-                # 记录请求体大小和消息数（用于排查上下文超长问题）
+                # 记录请求体大小和消息数
                 msg_count = len(upstream_request_data.get("messages", []))
                 body_size = len(json.dumps(upstream_request_data, ensure_ascii=False))
 
-                # 检测请求是否包含图片内容（排查图片上下文超限问题）
-                has_image = image_stats["image_count"] > 0
-
-                logger.info(f"[代理] v1.6.6 WorkBuddy Relay 请求 {int((time.time()-t0)*1000)}ms, model={model}, key={label}, "
+                logger.info(f"[代理] 透传请求 {int((time.time()-t0)*1000)}ms, model={model}, key={label}, "
                            f"messages={msg_count}, body={body_size}B ({body_size//1024}KB), "
-                           f"stream={client_wants_stream}, image={has_image}, images={image_stats['image_count']}, "
-                           f"data_uri={image_stats['data_uri_count']}, max_image_chars={image_stats['max_image_chars']}, "
-                           f"dropped={build_meta['dropped_fields']}, "
-                           f"history_images_replaced={build_meta['history_images_replaced']}, "
-                           f"normalized_images={build_meta['normalized_images']}, "
-                           f"unsupported_inline_images_removed={build_meta['unsupported_inline_images_removed']}, "
-                           f"mode={build_meta['mode']}, stream_options={build_meta['has_stream_options']}")
+                           f"stream={client_wants_stream}")
 
                 # ─── 发送请求到上游 ───
                 session = self.router._get_session(upstream_url)
                 t_send = time.time()
+
                 resp = session.post(
                     target_url,
                     json=upstream_request_data,
@@ -3216,162 +2983,41 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
                     # 故障转移分类（优化项 #7）
                     error_type = self.router._classify_error(resp.status_code, resp_body)
-                    upstream_error_log = _parse_upstream_error_for_log(resp.status_code, resp_body, resp.headers)
-                    request_error_log = _summarize_request_for_error_log(
-                        upstream_request_data, req_headers, build_meta
-                    )
-                    last_upstream_error_log = upstream_error_log
+                    last_upstream_error_log = {"status": resp.status_code, "body": resp_body[:500]}
                     logger.warning(
-                        "[上游错误详情] %s",
-                        _safe_json_for_log({
-                            "model": model,
-                            "key": label,
-                            "url": target_url,
-                            "attempt": total_attempts,
-                            "error_type": error_type,
-                            "upstream": upstream_error_log,
-                            "request": request_error_log,
-                        }, limit=16000),
+                        "[上游错误详情] model=%s key=%s url=%s attempt=%d error_type=%s status=%d body=%s",
+                        model, label, target_url, total_attempts, error_type, resp.status_code, resp_body[:500],
                     )
 
                     # 根据状态码标记 Key
                     if resp.status_code == 429:
-                        # 区分「额度耗尽」和「临时限流」
-                        is_quota_exhausted = False
-                        try:
-                            err_json = json.loads(resp_body)
-                            err_code = (err_json.get("error", {}).get("data", {}).get("code", 0)
-                                        or err_json.get("code", 0))
-                            if err_code in (14018, 14019):  # 14018=额度已用尽, 14019=额度不足
-                                is_quota_exhausted = True
-                        except (json.JSONDecodeError, AttributeError):
-                            pass
-
-                        if is_quota_exhausted:
-                            # 额度耗尽 → 自动获取新的 BuddyKey 替换当前上游 Key
-                            logger.warning(f"[额度耗尽] Key {label} 额度耗尽(429/14018)，尝试获取新 BuddyKey")
-                            self._add_log(event="upstream_429", sub_key=sub_key, upstream_key=upstream_key,
-                                          model=model, error=f"额度耗尽，正在获取新 BuddyKey", upstream_status=429)
-                            new_key = self._refresh_buddykey()
-                            if new_key:
-                                logger.info(f"[额度耗尽] 已获取新 BuddyKey，重试请求")
-                                # 清除已尝试的 key，让重试循环用新 key
-                                tried_key_ids.clear()
-                                continue
-                            else:
-                                logger.warning(f"[额度耗尽] 获取新 BuddyKey 失败，标记 Key 为 exhausted")
-                                self.router.mark_key_exhausted(key_id)
-                                error_detail = f"Key {label} 额度耗尽且获取新 BuddyKey 失败: {resp_body[:200]}"
-                        else:
-                            # 临时限流：模型级冷却 + 渐进退避（优化项 #8/#10）
-                            cooldown_secs = self.router.mark_model_cooldown(key_id, model)
-                            last_cooldown_secs = cooldown_secs
-                            error_detail = f"Key {label} 模型 {model} 被限流(429)，冷却 {cooldown_secs}s: {resp_body[:200]}"
-                        logger.warning(f"[重试] {error_detail}")
+                        # 429 一律视为额度耗尽/限流，标记 Key 为 exhausted
+                        logger.warning(f"[额度耗尽] Key {label} 上游返回 429，标记为 exhausted")
                         self._add_log(event="upstream_429", sub_key=sub_key, upstream_key=upstream_key,
-                                      model=model, error=error_detail, upstream_status=429)
+                                      model=model, error=f"额度耗尽或被限流: {resp_body[:200]}", upstream_status=429)
+                        self.router.mark_key_exhausted(key_id)
+                        error_detail = f"Key {label} 429: {resp_body[:200]}"
+                        logger.warning(f"[重试] {error_detail}")
                     elif resp.status_code == 401:
-                        # 区分：401 返回 JSON（真正的认证失败） vs 返回 HTML（网关层拦截）
-                        is_html_response = "<html>" in resp_body.lower() or "<!doctype" in resp_body.lower()
-                        if is_html_response:
-                            # openresty/APISIX 网关层拦截（可能是超长上下文被 WAF 拦截）
-                            # 不冷却 Key（不是 Key 的问题），直接返回错误，不重试（FATAL）
-                            error_detail = f"Key {label} 401 返回 HTML（网关拦截）: {resp_body[:200]}"
-                            logger.warning(f"[拒绝] {error_detail}")
-                            self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
-                                          model=model, error=error_detail, upstream_status=401)
-                            self._send_json(502, {
-                                "error": {
-                                    "message": "请求被上游网关拦截，可能是上下文过长或请求格式异常。请尝试新开对话。",
-                                    "type": "upstream_gateway_rejected"
-                                }
-                            })
-                            return
-                        # 401：纯 API 头不应该出现 invalid_format，如果有说明 Key 有问题
+                        # 401 认证失败 → 标记为 rate_limited
                         logger.info(f"[401] Key {label} 上游返回: status=401, body={resp_body[:500]}")
-                        # 401 认证失败 → 标记为 rate_limited（不自动恢复，需手动或下次查分恢复）
                         self.router.mark_key_rate_limited(key_id)
                         error_detail = f"Key {label} 认证失败(401): {resp_body[:200]}"
                         logger.warning(f"[重试] {error_detail}")
                         self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
                                       model=model, error=error_detail, upstream_status=401)
-                    elif resp.status_code == 400 and not resp_body.strip():
-                        # 400 空 body：上游临时问题，不判定为上下文过长，直接换 Key 重试
-                        logger.warning(f"[重试] Key {label} 上游返回 400 空 body，换 Key 重试")
+                    elif resp.status_code == 403:
+                        # 403 风控/禁止 → 标记为 abnormal
+                        error_detail = f"Key {label} 被拒绝(403): {resp_body[:200]}"
+                        logger.warning(f"[风控] {error_detail}")
                         self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
-                                      model=model, error="上游返回400空body", upstream_status=400)
-                        last_error = json.dumps({"error": {"message": "上游返回为空，请重试", "type": "upstream_empty_response"}})
-                        last_error_status = 502
-                    elif resp.status_code == 400 and ("input length too long" in resp_body or '"code":11115' in resp_body):
-                        # Let WorkBuddy handle context compaction itself. Returning the
-                        # recognizable 11115/input-length error avoids creating invalid
-                        # partial tool-message histories in the proxy.
-                        error_detail = f"Key {label} 上游返回 400 input length too long"
-                        logger.warning(f"[拒绝] {error_detail}")
-                        self._add_log(event="end", sub_key=sub_key, upstream_key=upstream_key,
-                                      model=model, error="context_too_long")
-                        self._send_json(400, {
-                            "code": 11115,
-                            "msg": "input length too long",
-                            "error": {
-                                "message": "input length too long",
-                                "type": "context_length_exceeded",
-                                "code": 11115,
-                            }
-                        })
-                        return
+                                      model=model, error=error_detail, upstream_status=403)
+                        self.router.mark_key_abnormal(key_id)
                     else:
-                        # 检测 403 风控（code:11140 request illegal）
-                        if resp.status_code == 403 and '"code":11140' in resp_body:
-                            error_detail = f"Key {label} 被风控(403/11140): {resp_body[:200]}"
-                            logger.warning(f"[风控] {error_detail}")
-                            self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
-                                          model=model, error=error_detail, upstream_status=403)
-                            # 标记为 abnormal，不再参与轮询
-                            self.router.mark_key_abnormal(key_id)
-                        elif resp.status_code == 400:
-                            # 400 但不是空body也不是 input length too long — 记录真正发给上游的参数用于排查
-                            code = upstream_error_log.get("code")
-                            msg = upstream_error_log.get("msg")
-                            request_id = upstream_error_log.get("requestId") or upstream_error_log.get("request_id_header")
-                            ext_error = upstream_error_log.get("extError")
-                            logger.warning(
-                                "[400排查] %s",
-                                _safe_json_for_log({
-                                    "model": model,
-                                    "key": label,
-                                    "code": code,
-                                    "msg": msg,
-                                    "requestId": request_id,
-                                    "extError": ext_error,
-                                    "raw_body": upstream_error_log.get("raw_body"),
-                                    "request": request_error_log,
-                                }, limit=16000),
-                            )
-                            error_detail = _safe_json_for_log({
-                                "key": label,
-                                "status": 400,
-                                "code": code,
-                                "msg": msg,
-                                "requestId": request_id,
-                                "extError": ext_error,
-                                "raw_body": upstream_error_log.get("raw_body"),
-                                "request_fields": request_error_log.get("body_fields"),
-                                "non_message_fields": request_error_log.get("non_message_fields"),
-                                "messages": request_error_log.get("messages"),
-                                "image_stats": request_error_log.get("image_stats"),
-                                "relay_meta": build_meta,
-                            }, limit=6000)
-                            # 记录到 DB 日志面板，方便用户排查原始 400 错误
-                            self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
-                                          model=model, error=error_detail, upstream_status=400)
-                            # 11133 可能是上游节点偶发故障（不是参数问题），换 Key 重试通常能解决
-                            # 不冷却该 Key（避免误伤），只标记 tried 换下一个 Key
-                        else:
-                            error_detail = f"Key {label} 上游返回 {resp.status_code}: {resp_body[:200]}"
-                            logger.warning(f"[重试] {error_detail}")
-                            self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
-                                          model=model, error=error_detail, upstream_status=resp.status_code)
+                        error_detail = f"Key {label} 上游返回 {resp.status_code}: {resp_body[:200]}"
+                        logger.warning(f"[重试] {error_detail}")
+                        self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
+                                      model=model, error=error_detail, upstream_status=resp.status_code)
 
                     # ─── 故障转移决策（优化项 #7）───
                     # FATAL 已在上面 return，此处只处理 RETRY_SAME 和 SWITCH_KEY
@@ -3987,7 +3633,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 cached_t = last_usage.get("cached_tokens", 0) or last_usage.get("prompt_cache_hit_tokens", 0)
                 credit = last_usage.get("credit", 0.0)
 
-                # 上游 Key 统计（原子递增）
+                # 上游 Key 统计（原子递增）— 透传模式，直接用原始 token/credit
                 self.db.increment_upstream_key_stats(
                     key_id,
                     prompt_tokens=prompt_t,
@@ -3997,24 +3643,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     credits=credit,
                 )
 
-                # 实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
+                # 实时扣除积分余额（本地估算）
                 if credit > 0:
                     self.db.deduct_key_points(key_id, credit)
-                    # 同时扣除积分包余额（本地缓存，单位与上游 credit 一致）
                     before = self.db.get_cached_credits_balance()
                     self.db.deduct_cached_credits(credit)
                     after = self.db.get_cached_credits_balance()
                     logger.info(f"[积分扣减] credit={credit}, 余额 {before:.2f} → {after:.2f}")
 
-                    # 实时注入积分到 WorkBuddy（后台线程，避免阻塞响应）
-                    threading.Thread(
-                        target=_inject_credits_to_workbuddy,
-                        args=(after,),
-                        daemon=True,
-                    ).start()
-
-                # 子 Key 统计（原子递增）— 透传模式没有真实子Key，跳过
-                if sub_key_id != "_passthrough_":
+                # 子 Key 统计（原子递增）— buddyKey 模式下跳过，只有单一 key
+                if sub_key_id != "_buddykey_":
                     self.db.increment_sub_api_key_stats(
                         sub_key_id,
                         prompt_tokens=prompt_t,
@@ -4024,7 +3662,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                         credits=credit,
                     )
 
-                # 写请求日志（含首字时间，优化项 #13）
+                # 写请求日志
                 self.db.add_request_log({
                     "timestamp": time.time(),
                     "sub_key_id": sub_key_id,
@@ -4040,22 +3678,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     "first_token_ms": first_token_ms or 0,
                 })
 
-                # 上报使用量到服务端（本地缓存 + 后台上报）
-                if prompt_t > 0 or completion_t > 0:
-                    try:
-                        from ..utils.usage_reporter import add_pending_report
-                        add_pending_report(
-                            credits_used=credit,
-                            model=model,
-                            request_tokens=prompt_t,
-                            response_tokens=completion_t,
-                            upstream_id=key_id,
-                        )
-                    except Exception as e:
-                        logger.debug(f"[上报] 使用量上报失败: {e}")
-
-                # 请求完成后异步查分（限频 1 分钟/次）
-                self.db.refresh_key_points_if_needed(key_id)
             except Exception as e:
                 logger.error(f"[统计] 更新统计失败: {e}")
 
@@ -4101,18 +3723,6 @@ class ProxyServer:
             # 启动后台健康检测线程（优化项 #17）
             self.router.start_health_check()
             logger.info(f"API 代理服务已启动: http://{self.host}:{self.port}")
-
-            # 启动时注入当前积分到 WorkBuddy（延迟，等 WorkBuddy 页面加载）
-            def _delayed_inject():
-                import time as _time
-                _time.sleep(3)
-                try:
-                    balance = self.db.get_cached_credits_balance()
-                    if balance >= 0:
-                        _inject_credits_to_workbuddy(balance)
-                except Exception as e:
-                    logger.warning(f"[WorkBuddy注入] 启动注入异常: {e}")
-            threading.Thread(target=_delayed_inject, daemon=True).start()
 
             return True
         except Exception as e:

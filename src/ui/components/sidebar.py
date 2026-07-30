@@ -47,7 +47,7 @@ class Sidebar(QWidget):
         layout.setSpacing(0)
 
         # Logo
-        logo_label = QLabel("⚡ Buddy")
+        logo_label = QLabel("⚡ BuddyToolNew")
         logo_label.setObjectName("sidebar_logo")
         layout.addWidget(logo_label)
 

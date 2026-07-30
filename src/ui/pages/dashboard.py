@@ -486,6 +486,7 @@ class DashboardPage(QWidget):
             self._colors['accent'], self._colors['border'], self._colors['text_primary']
         )
         self._chk_workbuddy.setChecked(load_setting("config_target_workbuddy", "true") == "true")
+        self._chk_workbuddy.toggled.connect(lambda checked: save_setting("config_target_workbuddy", "true" if checked else "false"))
         proxy_ctrl_layout.addWidget(self._chk_workbuddy)
 
         # CodeBuddy
@@ -494,6 +495,7 @@ class DashboardPage(QWidget):
             self._colors['accent'], self._colors['border'], self._colors['text_primary']
         )
         self._chk_codebuddy.setChecked(load_setting("config_target_codebuddy", "true") == "true")
+        self._chk_codebuddy.toggled.connect(lambda checked: save_setting("config_target_codebuddy", "true" if checked else "false"))
         proxy_ctrl_layout.addWidget(self._chk_codebuddy)
 
         # 自动备份 + 打开备份目录
@@ -502,6 +504,7 @@ class DashboardPage(QWidget):
             self._colors['accent'], self._colors['border'], self._colors['text_primary']
         )
         self._chk_auto_backup.setChecked(load_setting("config_auto_backup", "true") == "true")
+        self._chk_auto_backup.toggled.connect(lambda checked: save_setting("config_auto_backup", "true" if checked else "false"))
 
         backup_row = QHBoxLayout()
         backup_row.addWidget(self._chk_auto_backup)
@@ -892,7 +895,10 @@ class DashboardPage(QWidget):
         """打开激活卡密对话框"""
         from .accounts import AddAccountDialog
         dialog = AddAccountDialog(self)
-        dialog.account_added.connect(lambda _: self._refresh_credits())
+        def _on_account_added(_):
+            self._refresh_credits()
+            self._refresh_subkey_display()
+        dialog.account_added.connect(_on_account_added)
         dialog.exec()
 
     def set_proxy_page(self, proxy_page):
@@ -1056,31 +1062,6 @@ class DashboardPage(QWidget):
             self._diag_dialog.deleteLater()
             self._diag_dialog = None
 
-    def _run_diag_animation(self, port: int):
-        """逐条展示诊断进度（过渡动画），完成后触发获取 BuddyKey"""
-        from PySide6.QtCore import QTimer
-
-        self._diag_step = 0
-
-        def _advance():
-            idx = self._diag_step
-            if idx < len(self._diag_items_def):
-                name, desc_template = self._diag_items_def[idx]
-                desc = desc_template.replace("{port}", str(port))
-                # 更新描述
-                desc_label = self._diag_rows[idx][3]
-                desc_label.setText(desc)
-                # 标记为通过
-                self._set_diag_row_status(idx, "通过", "success")
-                self._diag_step += 1
-                # 继续下一项
-                QTimer.singleShot(400, _advance)
-            else:
-                # 全部完成 → 获取 BuddyKey
-                self._fetch_buddykey()
-
-        _advance()
-
     def _toggle_proxy_service(self):
         """启动/停止代理服务"""
         if not self._proxy_page:
@@ -1102,7 +1083,8 @@ class DashboardPage(QWidget):
         except Exception:
             pass
 
-        # 自动同步配置到所选客户端（根据勾选）
+        # 保存客户端勾选状态并自动同步配置到所选客户端
+        self._save_client_config()
         self._auto_sync_config_before_start()
 
         # 显示加载弹窗
@@ -1112,9 +1094,9 @@ class DashboardPage(QWidget):
         self._proxy_status_label.setText("⏳ 正在启动...")
         self._proxy_status_label.setStyleSheet("font-weight: 600; color: #D69E2E;")
 
-        # 直接获取 BuddyKey（不再走诊断动画）
+        # 直接启动代理服务（buddyKey 在激活卡密时已写入上游 Key 池，无需再获取）
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(300, lambda: self._fetch_buddykey())
+        QTimer.singleShot(300, lambda: self._on_service_started(True))
 
     def _auto_sync_config_before_start(self):
         """启动服务前自动同步配置到所选客户端（根据勾选）
@@ -1150,7 +1132,7 @@ class DashboardPage(QWidget):
 
         # 自动备份
         if self._chk_auto_backup.isChecked():
-            backup_root = Path.home() / ".buddy-tool" / "config_backups"
+            backup_root = Path.home() / ".buddytoolnew" / "config_backups"
             backup_root.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             for name, target_dir in targets:
@@ -1196,106 +1178,6 @@ class DashboardPage(QWidget):
             )
             self._silent_workbuddy_thread.start()
 
-    def _fetch_buddykey(self):
-        """后台请求 BuddyKey"""
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class BuddyKeyThread(QThread):
-            done = QSignal(object)
-
-            def run(self):
-                from ...utils.server_api import get_buddykey
-                try:
-                    result = get_buddykey()
-                    self.done.emit(result)
-                except Exception as e:
-                    self.done.emit({"success": False, "message": str(e)})
-
-        self._buddykey_thread = BuddyKeyThread()
-        self._buddykey_thread.done.connect(self._on_buddykey_done)
-        self._buddykey_thread.finished.connect(lambda: setattr(self, '_buddykey_thread', None))
-        self._buddykey_thread.start()
-
-    def _on_buddykey_done(self, result: dict):
-        """获取 BuddyKey 完成"""
-        if not result or not result.get("success"):
-            err = (result or {}).get("error") or (result or {}).get("message") or "未知错误"
-            self._proxy_status_label.setText("⏹ 已停止")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_proxy_btn.setEnabled(True)
-            self._close_loading_dialog()
-            QMessageBox.warning(self, "启动失败", f"无法获取激活码：{err}")
-            return
-
-        buddy_key = result.get("buddyKey", "")
-        if not buddy_key:
-            self._proxy_status_label.setText("⏹ 已停止")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_proxy_btn.setEnabled(True)
-            self._close_loading_dialog()
-            QMessageBox.warning(self, "启动失败", "服务端未返回激活码")
-            return
-
-        # 检查余额，余额为 0 时拒绝启动
-        balance = result.get("balance", 0)
-        if balance is None:
-            balance = 0
-        try:
-            balance = float(balance)
-        except (TypeError, ValueError):
-            balance = 0.0
-
-        if balance <= 0:
-            self._proxy_status_label.setText("⏹ 已停止")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_proxy_btn.setEnabled(True)
-            self._close_loading_dialog()
-            QMessageBox.warning(self, "无法启动", f"账户余额为 0，请充值后再启动服务。")
-            return
-
-        # 在后台线程中处理 key 写入和服务启动，避免主线程阻塞
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class StartServiceThread(QThread):
-            done = QSignal(bool)
-
-            def __init__(self, dashboard_page, buddy_key_str, balance_val):
-                super().__init__()
-                self._dashboard = dashboard_page
-                self._buddy_key = buddy_key_str
-                self._balance = balance_val
-
-            def run(self):
-                try:
-                    import secrets as _sec
-                    from datetime import datetime
-                    db = self._dashboard._proxy_page._db
-
-                    # 清除旧的上游 key
-                    for k in db.get_upstream_keys():
-                        db.delete_upstream_key(k.get("key_id", ""))
-
-                    db.add_upstream_key({
-                        "key_id": f"bk_{_sec.token_hex(4)}",
-                        "api_key": self._buddy_key,
-                        "label": f"BuddyKey (余额 {self._balance:.1f})",
-                        "status": "active",
-                        "used_count": 0,
-                        "points": str(self._balance),
-                        "points_updated_at": datetime.now().isoformat(),
-                        "created_at": datetime.now().isoformat(),
-                    })
-                    self._dashboard._proxy_page._invalidate_proxy_auth_cache()
-                    self.done.emit(True)
-                except Exception as e:
-                    logger.error(f"启动服务失败: {e}")
-                    self.done.emit(False)
-
-        self._start_service_thread = StartServiceThread(self, buddy_key, balance)
-        self._start_service_thread.done.connect(self._on_service_started)
-        self._start_service_thread.finished.connect(lambda: setattr(self, '_start_service_thread', None))
-        self._start_service_thread.start()
-
     def _on_service_started(self, success: bool):
         """服务启动完成回调（在主线程执行）"""
         if not success:
@@ -1310,6 +1192,8 @@ class DashboardPage(QWidget):
         self._proxy_page._toggle_service()
         self._toggle_proxy_btn.setEnabled(True)
         self._sync_proxy_status()
+        # 刷新子 API Key 显示（确保显示 buddyKey）
+        self._refresh_subkey_display()
 
         # 关闭加载弹窗
         self._close_loading_dialog()
@@ -1367,20 +1251,23 @@ class DashboardPage(QWidget):
             QApplication.clipboard().setText(key)
 
     def _refresh_subkey_display(self):
-        """刷新子 API Key 显示"""
+        """刷新 API Key 显示 — 只显示 buddyKey（机器码）"""
         if not self._proxy_page:
             return
-        sub_keys = self._proxy_page._db.get_sub_api_keys()
-        if sub_keys:
-            self._subkey_label.setText(sub_keys[0].get("api_key", "sk-"))
+        from ...utils.machine import get_machine_code
+        machine_code = get_machine_code()
+        if machine_code:
+            logger.info(f"[_refresh_subkey_display] 显示 buddyKey: {machine_code[:16]}... (长度 {len(machine_code)})")
+            self._subkey_label.setText(machine_code)
         else:
-            self._subkey_label.setText("sk-（启动服务后自动生成）")
+            logger.info("[_refresh_subkey_display] 未激活，buddyKey 为空")
+            self._subkey_label.setText("未激活（请先激活卡密）")
 
     def _open_backup_dir(self):
         """打开备份目录"""
         import os
         from pathlib import Path
-        backup_dir = Path.home() / ".buddy-tool" / "config_backups"
+        backup_dir = Path.home() / ".buddytoolnew" / "config_backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         os.startfile(str(backup_dir)) if hasattr(os, 'startfile') else None
 
@@ -1406,27 +1293,13 @@ class DashboardPage(QWidget):
         from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
 
         port = self._port_spin.value()
-        sub_keys = self._proxy_page._db.get_sub_api_keys() if self._proxy_page else []
-        api_key = sub_keys[0].get("api_key", "") if sub_keys else ""
-
-        # 如果没有子 API Key，自动生成一个
-        if not api_key and self._proxy_page:
-            api_key = f"sk-{_sec.token_urlsafe(32)}"
-            self._proxy_page._db.add_sub_api_key({
-                "key_id": f"sk_{_sec.token_hex(4)}",
-                "api_key": api_key,
-                "label": "",
-                "is_active": True,
-                "allowed_models": [],
-                "allowed_key_ids": [],
-                "max_usage": 0,
-                "used_count": 0,
-                "rate_limit_rpm": 1000,
-                "key_mode": 1,
-                "created_at": datetime.now().isoformat(),
-            })
-            self._proxy_page._invalidate_proxy_auth_cache()
-            self._refresh_subkey_display()
+        # 只用 buddyKey（机器码）作为 API Key
+        from ...utils.machine import get_machine_code
+        api_key = get_machine_code()
+        if not api_key:
+            # 未激活，无法生成配置
+            logger.warning("[_build_config_json] buddyKey 为空，未激活")
+            api_key = "未激活"
 
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
 
@@ -1583,7 +1456,7 @@ class DashboardPage(QWidget):
 
         # 自动备份
         if self._chk_auto_backup.isChecked():
-            backup_root = Path.home() / ".buddy-tool" / "config_backups"
+            backup_root = Path.home() / ".buddytoolnew" / "config_backups"
             backup_root.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             for name, target_dir in targets:

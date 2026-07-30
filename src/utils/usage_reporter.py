@@ -17,8 +17,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
-# 缓存目录: ~/.buddy-tool/usage_pending/
-_CACHE_DIR = Path.home() / ".buddy-tool" / "usage_pending"
+# 缓存目录: ~/.buddytoolnew/usage_pending/
+_CACHE_DIR = Path.home() / ".buddytoolnew" / "usage_pending"
 
 # 加密密钥（AES-256-GCM，与服务端一致）
 _AES_KEY = bytes.fromhex("38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0")

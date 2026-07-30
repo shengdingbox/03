@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>nul
 echo ========================================
-echo   Buddy Tool - 一键打包 EXE (Nuitka)
+echo   BuddyToolNew - 一键打包 EXE (Nuitka)
 echo ========================================
 echo.
 
@@ -21,7 +21,7 @@ if errorlevel 1 (
 )
 
 :::: 清理旧构建
-if exist "dist\BuddyTool" rmdir /s /q dist\BuddyTool
+if exist "dist\BuddyToolNew" rmdir /s /q dist\BuddyToolNew
 if exist "build" rmdir /s /q build
 
 echo 正在打包，请稍候（Nuitka 首次编译约 5-10 分钟）...
@@ -40,7 +40,7 @@ venv\Scripts\python.exe -m nuitka ^
     --include-data-dir=src\i18n=src\i18n ^
     --include-data-file=src\VERSION=src\VERSION ^
     --output-dir=dist ^
-    --output-filename="BuddyTool.exe" ^
+    --output-filename="BuddyToolNew.exe" ^
     --assume-yes-for-downloads ^
     app.py
 
@@ -54,15 +54,15 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo   打包成功！
-echo   输出文件: dist\BuddyTool.exe
+echo   输出文件: dist\BuddyToolNew.exe
 echo ========================================
 echo.
 
 :::: 显示文件大小
-for /f %%A in ('dir /b "dist\BuddyTool.exe"') do echo 文件: %%A
+for /f %%A in ('dir /b "dist\BuddyToolNew.exe"') do echo 文件: %%A
 
 echo.
-echo 将 dist\BuddyTool.exe 直接分发给用户即可
+echo 将 dist\BuddyToolNew.exe 直接分发给用户即可
 echo 用户双击运行，无需安装 Python
 echo.
 

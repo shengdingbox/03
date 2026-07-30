@@ -1,4 +1,4 @@
-"""主窗口 - Buddy Tool 桌面应用"""
+"""主窗口 - BuddyToolNew 桌面应用"""
 
 import logging
 import os
@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._update_version_suffix()
-        self.setWindowTitle("⚡ Buddy Tool")
+        self.setWindowTitle("⚡ BuddyToolNew")
         self.setMinimumSize(QSize(1100, 700))
         self.resize(1200, 800)
 
@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
     def _update_version_suffix(self):
         """更新窗口标题中的版本号"""
         ver = get_current_version()
-        self.setWindowTitle(f"⚡ Buddy Tool v{ver}")
+        self.setWindowTitle(f"⚡ BuddyToolNew v{ver}")
 
     def _auto_checkin(self):
         """自动签到 — 后台静默执行，不弹窗"""
@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
     def _setup_tray(self):
         """设置系统托盘"""
         self._tray = QSystemTrayIcon(self)
-        self._tray.setToolTip("Buddy Tool")
+        self._tray.setToolTip("BuddyToolNew")
 
         # 加载应用图标（优先 .ico 文件，降级为程序化生成）
         app_icon = self._load_app_icon()
@@ -504,7 +504,7 @@ class MainWindow(QMainWindow):
             self.hide()
             self._tray.show()
             self._tray.showMessage(
-                "Buddy Tool",
+                "BuddyToolNew",
                 "已最小化到系统托盘，双击图标恢复",
             )
         else:
