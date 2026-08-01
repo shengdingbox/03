@@ -356,13 +356,18 @@ class CreditsDetailDialog(QDialog):
 
 
 class AccountsPage(QWidget):
-    """账号管理页面"""
+    """账号管理页面 — 额度管理 + 消耗明细
+
+    可作为子组件嵌入 Dashboard 页面（embedded=True 时不渲染标题/副标题/滚动容器，
+    只渲染使用情况图表、消耗明细等核心内容）。
+    """
 
     quota_updated = Signal()  # 积分更新信号，通知其他页面刷新
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, embedded: bool = False):
         super().__init__(parent)
         self.setObjectName("content_area")
+        self._embedded = embedded
         self._accounts = []
         self._filtered_accounts = []
         self._usage_logs = []
@@ -380,7 +385,15 @@ class AccountsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 标题
+        # 嵌入模式：不渲染标题/副标题/外层滚动容器，直接作为内容
+        if self._embedded:
+            content_layout = layout
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(16)
+            self._setup_content(content_layout)
+            return
+
+        # 独立模式：保留原页面标题/副标题/滚动容器
         title = QLabel(t("accounts.title"))
         title.setObjectName("page_title")
         layout.addWidget(title)
@@ -394,6 +407,24 @@ class AccountsPage(QWidget):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(16)
+        self._setup_content(content_layout)
+
+        # 用滚动区域包裹内容，确保表格不被压缩
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+    def _setup_content(self, content_layout: QVBoxLayout):
+        """构建核心内容（消耗明细按钮 + 隐藏控件）
+
+        被 _setup_ui 的独立模式和与嵌入模式共用。
+        """
 
         # 隐藏控件（保留引用避免报错）
         self._btn_batch_del = QPushButton()
@@ -412,185 +443,58 @@ class AccountsPage(QWidget):
         self._quota_badge_label = QLabel("--")
         self._quota_progress = QProgressBar()
         self._quota_progress.setVisible(False)
-
-        # === 使用情况图表区域 ===
-        self._usage_title = QLabel("📊 使用情况")
-        self._usage_title.setStyleSheet(
-            f"font-size: 16px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
-        )
-        content_layout.addWidget(self._usage_title)
-
-        # 时间范围切换按钮
-        range_layout = QHBoxLayout()
-        range_layout.setSpacing(8)
-
+        # 使用情况相关控件（保留隐藏引用，逻辑中会调用）
+        self._usage_title = QLabel()
+        self._usage_title.setVisible(False)
         self._range_btn_group = QButtonGroup(self)
         self._range_btn_group.setExclusive(True)
-
-        range_configs = [
-            ("today", "今日"),
-            ("7d", "近7天"),
-            ("30d", "近30天"),
-            ("all", "总计"),
-        ]
         self._range_buttons = []
-        for key, label_text in range_configs:
-            btn = QPushButton(label_text)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setProperty("range_key", key)
-            if key == self._usage_range:
-                btn.setChecked(True)
-                btn.setStyleSheet(self._range_btn_style_active())
-            else:
-                btn.setStyleSheet(self._range_btn_style_normal())
-            self._range_btn_group.addButton(btn)
-            self._range_buttons.append(btn)
-            range_layout.addWidget(btn)
-
-        range_layout.addStretch()
-        content_layout.addLayout(range_layout)
-
-        self._range_btn_group.buttonClicked.connect(self._on_range_changed)
-
-        # 使用情况统计卡片（5个）
         self._usage_grid = QGridLayout()
-        self._usage_grid.setSpacing(16)
-
-        self._usage_card_credits = StatCard("消耗积分", "--", "💰", "warning")
-        self._usage_card_prompt = StatCard("输入", "--", "⬆️", "accent")
-        self._usage_card_completion = StatCard("输出", "--", "⬇️", "success")
-        self._usage_card_total = StatCard("总Token", "--", "🔢", "accent")
-        self._usage_card_count = StatCard("请求数量", "--", "📈", "accent")
-
-        self._usage_grid.addWidget(self._usage_card_credits, 0, 0)
-        self._usage_grid.addWidget(self._usage_card_prompt, 0, 1)
-        self._usage_grid.addWidget(self._usage_card_completion, 0, 2)
-        self._usage_grid.addWidget(self._usage_card_total, 0, 3)
-        self._usage_grid.addWidget(self._usage_card_count, 0, 4)
-
-        content_layout.addLayout(self._usage_grid)
-        self._all_usage_cards = [
-            self._usage_card_credits, self._usage_card_prompt, self._usage_card_completion,
-            self._usage_card_total, self._usage_card_count,
-        ]
-
-        # 缓存命中率图表区域
+        self._all_usage_cards = []
+        # 命中率统计相关控件（已删除，保留隐藏占位避免外部调用报错）
         self._cache_frame = QFrame()
-        self._apply_cache_frame_style()
-        cache_layout = QHBoxLayout(self._cache_frame)
-        cache_layout.setContentsMargins(20, 16, 20, 16)
-        cache_layout.setSpacing(20)
-
-        # 环形图
+        self._cache_frame.setVisible(False)
         self._cache_chart = CacheHitRateChart()
-
-        # 右侧：标题 + 命中详情
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(12)
-
-        self._cache_title = QLabel("命中率统计")
-        self._cache_title.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-        right_layout.addWidget(self._cache_title)
-
-        # 6 项命中指标（3行 x 2列）
+        self._cache_chart.setVisible(False)
+        self._cache_title = QLabel()
+        self._cache_title.setVisible(False)
         self._legend_labels = {}
         self._legend_values = {}
-        legend_grid = QGridLayout()
-        legend_grid.setSpacing(8)
 
-        legend_items = [
-            ("input_hit", "输入命中", "success"),
-            ("input_rate", "输入命中率", "success"),
-            ("output_hit", "输出命中", "text_tertiary"),
-            ("output_rate", "输出命中率", "text_tertiary"),
-            ("total_hit", "总命中", "accent"),
-            ("total_rate", "总命中率", "accent"),
-        ]
-        for idx, (key, label_text, color_key) in enumerate(legend_items):
-            row = idx // 2
-            col = idx % 2
-            label = QLabel()
-            label.setTextFormat(Qt.TextFormat.RichText)
-            legend_grid.addWidget(label, row, col)
-            self._legend_labels[key] = (label, color_key, label_text)
-            self._legend_values[key] = "--"
-            self._render_legend(key)
+        # === 使用记录按钮（点击弹窗查看） ===
+        self._btn_usage_log = QPushButton("📊 使用记录")
+        self._btn_usage_log.setCursor(Qt.PointingHandCursor)
+        self._btn_usage_log.setMinimumHeight(40)
+        self._btn_usage_log.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['accent']};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 24px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_hover']};
+            }}
+        """)
+        self._btn_usage_log.clicked.connect(self._show_usage_log_dialog)
+        content_layout.addWidget(self._btn_usage_log)
 
-        right_layout.addLayout(legend_grid)
-        right_layout.addStretch()
-
-        cache_layout.addWidget(self._cache_chart)
-        cache_layout.addWidget(right_panel, 1)
-        content_layout.addWidget(self._cache_frame)
-
-        # === 消耗明细 ===
-        usage_card = QFrame()
-        usage_card.setObjectName("card")
-        usage_layout = QVBoxLayout(usage_card)
-        usage_layout.setSpacing(8)
-
-        usage_header = QHBoxLayout()
-        usage_icon = QLabel("📊")
-        usage_icon.setStyleSheet("font-size: 18px;")
-        usage_header.addWidget(usage_icon)
-
-        usage_title = QLabel("消耗明细")
-        usage_title.setStyleSheet("font-size: 15px; font-weight: 700;")
-        usage_header.addWidget(usage_title)
-        usage_header.addStretch()
-        usage_layout.addLayout(usage_header)
-
-        usage_subtitle = QLabel("每次调用的模型与 Token 消耗")
-        usage_subtitle.setStyleSheet("color: #9BA4B0; font-size: 12px;")
-        usage_layout.addWidget(usage_subtitle)
-
+        # 隐藏的消耗明细表格控件（保留引用避免外部调用报错，弹窗会创建自己的实例）
         self._usage_table = QTableWidget()
-        self._usage_table.setColumnCount(6)
-        self._usage_table.setHorizontalHeaderLabels([
-            "时间", "模型", "请求Token", "响应Token", "总Token", "扣除积分"
-        ])
-        usage_header_obj = self._usage_table.horizontalHeader()
-        usage_header_obj.setSectionResizeMode(QHeaderView.Stretch)
-        self._usage_table.setAlternatingRowColors(True)
-        self._usage_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._usage_table.setSelectionBehavior(QTableWidget.SelectRows)
-        # 至少展示10行（表头 + 10行数据）
-        self._usage_table.setMinimumHeight(10 * 30 + 30)
-        usage_layout.addWidget(self._usage_table)
-
-        # 消耗明细翻页栏
-        pager_row = QHBoxLayout()
-        self._btn_prev = QPushButton("◀ 上一页")
-        self._btn_prev.setObjectName("secondary_btn")
-        self._btn_prev.clicked.connect(self._prev_page)
-        pager_row.addWidget(self._btn_prev)
-
+        self._usage_table.setVisible(False)
+        self._usage_logs = []
+        self._current_page = 0
+        self._btn_prev = QPushButton()
+        self._btn_prev.setVisible(False)
+        self._btn_next = QPushButton()
+        self._btn_next.setVisible(False)
         self._page_label = QLabel("0 / 0")
-        self._page_label.setStyleSheet("font-size: 13px; font-weight: 600;")
-        self._page_label.setAlignment(Qt.AlignCenter)
-        pager_row.addWidget(self._page_label)
-
-        self._btn_next = QPushButton("下一页 ▶")
-        self._btn_next.setObjectName("secondary_btn")
-        self._btn_next.clicked.connect(self._next_page)
-        pager_row.addWidget(self._btn_next)
-
-        pager_row.addStretch()
-
-        pager_row.addWidget(QLabel("跳到:"))
+        self._page_label.setVisible(False)
         self._page_spin = QSpinBox()
-        self._page_spin.setRange(1, 1)
-        self._page_spin.setFixedWidth(70)
-        self._page_spin.valueChanged.connect(self._goto_page)
-        pager_row.addWidget(self._page_spin)
-
-        usage_layout.addLayout(pager_row)
-
-        content_layout.addWidget(usage_card)
+        self._page_spin.setVisible(False)
 
         # 进度条和日志（隐藏控件，保留引用避免报错）
         self._progress_bar = QProgressBar()
@@ -598,16 +502,10 @@ class AccountsPage(QWidget):
         self._log_edit = QTextEdit()
         self._log_edit.setVisible(False)
 
-        # 用滚动区域包裹内容，确保表格不被压缩
-        from PySide6.QtWidgets import QScrollArea
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        content_layout.addStretch()
-        scroll.setWidget(content)
-        layout.addWidget(scroll, 1)
+    def _show_usage_log_dialog(self):
+        """弹窗显示使用记录"""
+        dialog = UsageLogDialog(self, colors=self._colors)
+        dialog.exec()
 
     def _load_accounts(self):
         self._accounts = load_accounts()
@@ -707,6 +605,11 @@ class AccountsPage(QWidget):
             self._legend_values[key] = value
             self._render_legend(key)
 
+    def _refresh_legend_colors(self):
+        """主题切换时刷新所有图例颜色"""
+        for key in list(self._legend_labels.keys()):
+            self._render_legend(key)
+
     def _on_range_changed(self, btn):
         """时间范围切换回调"""
         key = btn.property("range_key")
@@ -720,94 +623,29 @@ class AccountsPage(QWidget):
             self._refresh_usage()
 
     def _refresh_usage(self):
-        """刷新使用情况数据"""
-        from ...modules.proxy_server import ProxyDatabase
-        db = ProxyDatabase.get_instance()
-        days_map = {"today": 1, "7d": 7, "30d": 30, "all": None}
-        days = days_map.get(self._usage_range, 1)
-        summary = db.get_usage_summary(days=days)
+        """刷新使用情况数据（命中率统计图表已删除，方法保留为空避免外部调用报错）"""
+        pass
 
-        # 更新5个统计卡片
-        prompt = summary["prompt_tokens"]
-        completion = summary["completion_tokens"]
-        total_tokens = prompt + completion
-        cached = summary["cached_tokens"]
-
-        self._usage_card_credits.set_value(f"{summary['credits']:,.2f}")
-        self._usage_card_prompt.set_value(self._format_token_count(prompt))
-        self._usage_card_completion.set_value(self._format_token_count(completion))
-        self._usage_card_total.set_value(self._format_token_count(total_tokens))
-        self._usage_card_count.set_value(self._format_token_count(summary["count"]))
-
-        # 计算各项命中率
-        input_hit = cached
-        input_rate = cached / prompt if prompt > 0 else 0.0
-        output_hit = 0  # 输出无缓存命中机制
-        output_rate = 0.0
-        total_hit = cached  # 输入命中 + 输出命中(0)
-        total_rate = cached / total_tokens if total_tokens > 0 else 0.0
-
-        # 更新环形图（中心显示总命中率）
-        self._cache_chart.set_rate(total_rate)
-
-        # 更新 6 项图例
-        self._update_legend("input_hit", self._format_token_count(input_hit))
-        self._update_legend("input_rate", f"{input_rate * 100:.1f}%")
-        self._update_legend("output_hit", self._format_token_count(output_hit))
-        self._update_legend("output_rate", f"{output_rate * 100:.1f}%")
-        self._update_legend("total_hit", self._format_token_count(total_hit))
-        self._update_legend("total_rate", f"{total_rate * 100:.1f}%")
-
-    # === 消耗明细分页逻辑 ===
+    # === 消耗明细分页逻辑（已搬到 UsageLogDialog，这里保留空方法避免 _render_page 调用报错）===
 
     @property
     def _total_pages(self) -> int:
-        return max(1, (len(self._usage_logs) + PAGE_SIZE - 1) // PAGE_SIZE)
+        return 1
 
     def _update_pager(self):
-        total = self._total_pages
-        self._page_label.setText(f"{self._current_page + 1} / {total}")
-        self._btn_prev.setEnabled(self._current_page > 0)
-        self._btn_next.setEnabled(self._current_page < total - 1)
-        self._page_spin.setRange(1, total)
-        self._page_spin.blockSignals(True)
-        self._page_spin.setValue(self._current_page + 1)
-        self._page_spin.blockSignals(False)
+        pass
 
     def _prev_page(self):
-        if self._current_page > 0:
-            self._current_page -= 1
-            self._render_usage_page()
+        pass
 
     def _next_page(self):
-        if self._current_page < self._total_pages - 1:
-            self._current_page += 1
-            self._render_usage_page()
+        pass
 
     def _goto_page(self, page: int):
-        if page >= 1 and page <= self._total_pages:
-            self._current_page = page - 1
-            self._render_usage_page()
+        pass
 
     def _render_usage_page(self):
-        """渲染当前页的消耗明细"""
-        start = self._current_page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        page_logs = self._usage_logs[start:end]
-
-        self._usage_table.setRowCount(len(page_logs))
-        for row, log in enumerate(reversed(page_logs)):
-            ts = log.get("timestamp", 0)
-            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
-            self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
-            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
-            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
-            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
-            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
-            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
-            credits = log.get("credits", 0)
-            self._usage_table.setItem(row, 5, QTableWidgetItem(f"{credits:.2f}" if credits else "-"))
-        self._update_pager()
+        pass
 
     def _on_header_sort(self, section: int):
         if self._sort_column == section:
@@ -867,29 +705,16 @@ class AccountsPage(QWidget):
                 api_status_item.setToolTip(account.status_reason)
             self._table.setItem(row, 2, api_status_item)
 
-        self._update_pager()
-
     def _refresh_table(self):
-        """刷新（加载账号数据 + 使用情况图表 + 消耗明细 + 积分卡片）"""
+        """刷新（加载账号数据 + 使用情况图表 + 积分卡片）"""
         self._load_accounts()
         self._filtered_accounts = self._accounts
         self._refresh_usage()
-        self._refresh_usage_table()
         self._update_quota_card()
 
     def _refresh_usage_table(self):
-        """刷新消耗明细表格（从 ProxyDatabase 读取最近的 request_logs）"""
-        from ...modules.proxy_server import ProxyDatabase
-        try:
-            db = ProxyDatabase.get_instance()
-            logs = db.get_request_logs(limit=1000)
-        except Exception:
-            logs = []
-
-        # 过滤掉输入和输出都为 0 的记录
-        self._usage_logs = [l for l in logs if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0]
-        self._current_page = 0
-        self._render_usage_page()
+        """消耗明细表格已搬到 UsageLogDialog，这里保留空方法避免外部调用报错"""
+        pass
 
     def _on_filter_changed(self):
         """筛选变化时重新渲染"""
@@ -1584,3 +1409,163 @@ class AccountsPage(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_table()
+
+
+class UsageLogDialog(QDialog):
+    """使用记录弹窗 — 显示消耗明细表格 + 翻页栏
+
+    点击 AccountsPage 中的"使用记录"按钮打开。
+    """
+
+    def __init__(self, parent=None, colors: dict = None):
+        super().__init__(parent)
+        self.setWindowTitle("使用记录")
+        self.setMinimumSize(900, 600)
+        self.resize(1000, 650)
+
+        self._colors = colors or _current_theme_colors()
+        self._usage_logs = []
+        self._current_page = 0
+
+        self._setup_ui()
+        self._refresh_usage_table()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # 标题
+        header = QHBoxLayout()
+        icon = QLabel("📊")
+        icon.setStyleSheet("font-size: 20px;")
+        header.addWidget(icon)
+        title = QLabel("消耗明细")
+        title.setStyleSheet(
+            f"font-size: 16px; font-weight: 700; color: {self._colors['text_primary']};"
+        )
+        header.addWidget(title)
+        header.addStretch()
+        layout.addLayout(header)
+
+        subtitle = QLabel("每次调用的模型与 Token 消耗")
+        subtitle.setStyleSheet(
+            f"color: {self._colors['text_tertiary']}; font-size: 12px;"
+        )
+        layout.addWidget(subtitle)
+
+        # 表格
+        self._usage_table = QTableWidget()
+        self._usage_table.setColumnCount(6)
+        self._usage_table.setHorizontalHeaderLabels([
+            "时间", "模型", "请求Token", "响应Token", "总Token", "扣除积分"
+        ])
+        usage_header_obj = self._usage_table.horizontalHeader()
+        usage_header_obj.setSectionResizeMode(QHeaderView.Stretch)
+        self._usage_table.setAlternatingRowColors(True)
+        self._usage_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._usage_table.setSelectionBehavior(QTableWidget.SelectRows)
+        layout.addWidget(self._usage_table, 1)
+
+        # 翻页栏
+        pager_row = QHBoxLayout()
+        self._btn_prev = QPushButton("◀ 上一页")
+        self._btn_prev.setObjectName("secondary_btn")
+        self._btn_prev.clicked.connect(self._prev_page)
+        pager_row.addWidget(self._btn_prev)
+
+        self._page_label = QLabel("0 / 0")
+        self._page_label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        self._page_label.setAlignment(Qt.AlignCenter)
+        pager_row.addWidget(self._page_label)
+
+        self._btn_next = QPushButton("下一页 ▶")
+        self._btn_next.setObjectName("secondary_btn")
+        self._btn_next.clicked.connect(self._next_page)
+        pager_row.addWidget(self._btn_next)
+
+        pager_row.addStretch()
+
+        pager_row.addWidget(QLabel("跳到:"))
+        self._page_spin = QSpinBox()
+        self._page_spin.setRange(1, 1)
+        self._page_spin.setFixedWidth(70)
+        self._page_spin.valueChanged.connect(self._goto_page)
+        pager_row.addWidget(self._page_spin)
+
+        layout.addLayout(pager_row)
+
+        # 关闭按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.setMinimumWidth(100)
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+    # === 翻页逻辑 ===
+    def _total_pages(self) -> int:
+        return max(1, (len(self._usage_logs) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    def _update_pager(self):
+        total = self._total_pages()
+        self._page_label.setText(f"{self._current_page + 1} / {total}")
+        self._btn_prev.setEnabled(self._current_page > 0)
+        self._btn_next.setEnabled(self._current_page < total - 1)
+        self._page_spin.setRange(1, total)
+        self._page_spin.blockSignals(True)
+        self._page_spin.setValue(self._current_page + 1)
+        self._page_spin.blockSignals(False)
+
+    def _prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self._render_usage_page()
+
+    def _next_page(self):
+        if self._current_page < self._total_pages() - 1:
+            self._current_page += 1
+            self._render_usage_page()
+
+    def _goto_page(self, page: int):
+        if page >= 1 and page <= self._total_pages():
+            self._current_page = page - 1
+            self._render_usage_page()
+
+    def _render_usage_page(self):
+        """渲染当前页的消耗明细"""
+        start = self._current_page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_logs = self._usage_logs[start:end]
+
+        self._usage_table.setRowCount(len(page_logs))
+        for row, log in enumerate(reversed(page_logs)):
+            ts = log.get("timestamp", 0)
+            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
+            self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
+            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
+            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
+            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
+            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
+            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
+            credits = log.get("credits", 0)
+            self._usage_table.setItem(row, 5, QTableWidgetItem(f"{credits:.2f}" if credits else "-"))
+        self._update_pager()
+
+    def _refresh_usage_table(self):
+        """刷新消耗明细表格（从 ProxyDatabase 读取最近的 request_logs）"""
+        try:
+            from ...modules.proxy_server import ProxyDatabase
+            db = ProxyDatabase.get_instance()
+            logs = db.get_request_logs(limit=10000)  # 全部读取，弹窗内分页展示
+        except Exception as e:
+            logger.error(f"加载使用记录失败: {e}")
+            logs = []
+        # 只显示有 token 消耗的记录
+        self._usage_logs = [
+            l for l in logs
+            if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0
+        ]
+        self._current_page = 0
+        self._render_usage_page()

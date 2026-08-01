@@ -27,14 +27,6 @@ LIGHT_THEME = {
     "border": "#E2E6EC",
     "border_light": "#EDF0F5",
     "shadow": "rgba(0,0,0,0.08)",
-    "sidebar_bg": "#FFFFFF",
-    "sidebar_text": "#5F6B7A",
-    "sidebar_logo": "#1A1D23",
-    "sidebar_border": "#E2E6EC",
-    "sidebar_active": "#E8F4FD",
-    "sidebar_active_text": "#2B6CB0",
-    "sidebar_hover": "#F0F2F5",
-    "sidebar_hover_text": "#1A1D23",
 }
 
 # 暗色主题
@@ -61,14 +53,6 @@ DARK_THEME = {
     "border": "#2F3540",
     "border_light": "#262B35",
     "shadow": "rgba(0,0,0,0.3)",
-    "sidebar_bg": "#12151A",
-    "sidebar_text": "#9BA4B0",
-    "sidebar_logo": "#E8ECF1",
-    "sidebar_border": "rgba(255,255,255,0.05)",
-    "sidebar_active": "#4DA3E8",
-    "sidebar_active_text": "#FFFFFF",
-    "sidebar_hover": "rgba(255,255,255,0.04)",
-    "sidebar_hover_text": "#FFFFFF",
 }
 
 
@@ -148,61 +132,8 @@ def get_stylesheet(theme: str = "system") -> str:
             background-color: {colors['bg_hover']};
         }}
 
-        /* === 侧边栏 === */
-        #sidebar {{
-            background-color: {colors['sidebar_bg']};
-            border-right: 1px solid {colors['sidebar_border']};
-            min-width: 220px;
-            max-width: 220px;
-        }}
-        #sidebar_logo {{
-            color: {colors['sidebar_logo']};
-            font-size: 18px;
-            font-weight: 700;
-            padding: 20px 16px 12px;
-        }}
-        #sidebar_version {{
-            color: {colors['sidebar_text']};
-            font-size: 11px;
-            padding: 0px 16px 16px;
-            opacity: 0.6;
-        }}
-
-        /* 侧边栏按钮 */
-        QPushButton#nav_btn {{
-            background-color: transparent;
-            color: {colors['sidebar_text']};
-            border: none;
-            border-radius: 8px;
-            padding: 10px 16px;
-            text-align: left;
-            font-size: 13px;
-            margin: 2px 8px;
-        }}
-        QPushButton#nav_btn:hover {{
-            background-color: {colors['sidebar_hover']};
-            color: {colors['sidebar_hover_text']};
-        }}
-        QPushButton#nav_btn[active="true"] {{
-            background-color: {colors['sidebar_active']};
-            color: {colors['sidebar_active_text']};
-            font-weight: 600;
-        }}
-        QFrame#sidebar_sep {{
-            background-color: {colors['sidebar_border']};
-            max-height: 1px;
-            margin: 8px 16px;
-        }}
-
         /* === 页面内容区 === */
         #content_area {{
-            background-color: {colors['bg_primary']};
-        }}
-        QScrollArea#settings_scroll_area {{
-            background-color: {colors['bg_primary']};
-            border: none;
-        }}
-        QWidget#settings_scroll_viewport {{
             background-color: {colors['bg_primary']};
         }}
         QWidget#settings_scroll_content {{

@@ -4,17 +4,16 @@ import logging
 import os
 import sys
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QSystemTrayIcon,
+    QMainWindow, QWidget, QHBoxLayout, QSystemTrayIcon,
     QMenu, QMessageBox, QApplication,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import Qt, QSize, Slot, QTimer
 
-from .ui import Sidebar, get_stylesheet
 from .ui.pages import (
-    DashboardPage, AccountsPage, CheckinPage,
-    SettingsPage, ApiProxyPage,
+    DashboardPage, AccountsPage, ApiProxyPage,
 )
+from .ui import get_stylesheet
 from .i18n import t
 from .utils.store import init_db, load_setting
 from .modules.updater import UpdateChecker, get_current_version
@@ -29,8 +28,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._update_version_suffix()
         self.setWindowTitle("⚡ BuddyToolNew")
-        self.setMinimumSize(QSize(1100, 700))
-        self.resize(1200, 800)
+        self.setMinimumSize(QSize(520, 520))
+        self.resize(600, 600)
 
         # 初始化数据库
         init_db()
@@ -46,86 +45,10 @@ class MainWindow(QMainWindow):
         # 自动更新
         self._setup_updater()
 
-        # 自动签到：已关闭
-
     def _update_version_suffix(self):
         """更新窗口标题中的版本号"""
         ver = get_current_version()
         self.setWindowTitle(f"⚡ BuddyToolNew v{ver}")
-
-    def _auto_checkin(self):
-        """自动签到 — 后台静默执行，不弹窗"""
-        try:
-            from .ui.pages.checkin import CheckinWorker
-            from .utils.store import load_accounts
-            from PySide6.QtCore import QThread, Signal as QSignal
-
-            accounts = load_accounts()
-            if not accounts:
-                return
-
-            # 只签未签到的
-            unchecked = [a for a in accounts if not a.checkin.checked_today]
-            if not unchecked:
-                logger.info("[自动签到] 所有账号今日已签到，跳过")
-                return
-
-            logger.info(f"[自动签到] 开始签到 {len(unchecked)} 个账号")
-
-            class AutoCheckinWorker(QThread):
-                done = QSignal()
-
-                def __init__(self, accs):
-                    super().__init__()
-                    self._accs = accs
-                    self._stop_flag = False
-
-                def stop(self):
-                    self._stop_flag = True
-
-                def run(self):
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    from .modules import CheckinManager
-                    from .utils.store import save_account
-
-                    success, already, failed = 0, 0, 0
-                    with ThreadPoolExecutor(max_workers=5) as executor:
-                        futures = {executor.submit(self._checkin_one, acc): acc for acc in self._accs}
-                        for future in as_completed(futures):
-                            if self._stop_flag:
-                                break
-                            try:
-                                status = future.result()
-                                if status == "success":
-                                    success += 1
-                                elif status == "already":
-                                    already += 1
-                                else:
-                                    failed += 1
-                            except Exception:
-                                failed += 1
-                    logger.info(f"[自动签到] 完成: 成功 {success}, 已签到 {already}, 失败 {failed}")
-
-                @staticmethod
-                def _checkin_one(account):
-                    try:
-                        manager = CheckinManager()
-                        result = manager.checkin_account(account)
-                        if result["success"]:
-                            save_account(account)
-                            if result.get("already"):
-                                return "already"
-                            return "success"
-                        return "failed"
-                    except Exception:
-                        return "failed"
-
-            self._auto_checkin_worker = AutoCheckinWorker(unchecked)
-            self._auto_checkin_worker.done.connect(lambda: self._checkin_timer.start())
-            self._auto_checkin_worker.start()
-
-        except Exception as e:
-            logger.error(f"[自动签到] 异常: {e}")
 
     def _setup_updater(self):
         """初始化自动更新检查器"""
@@ -173,50 +96,32 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "提示", "未获取到下载地址，请手动前往官网下载。")
 
     def _setup_ui(self):
-        """构建主界面"""
+        """构建主界面 — 单页面布局（合并仪表盘 + 额度管理，无侧边栏）"""
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 侧边栏
-        self._sidebar = Sidebar()
-        self._sidebar.page_changed.connect(self._switch_page)
-        layout.addWidget(self._sidebar)
+        # 单页面：DashboardPage（已内嵌 AccountsPage 的额度管理内容）
+        self._dashboard_page = DashboardPage()
+        layout.addWidget(self._dashboard_page, 1)
 
-        # 页面堆栈
-        self._stack = QStackedWidget()
-        self._pages = {
-            "dashboard": DashboardPage(),
-            "accounts": AccountsPage(),
-            "checkin": CheckinPage(),
-            "settings": SettingsPage(),
-        }
-
-        for page_id, page in self._pages.items():
-            self._stack.addWidget(page)
-
-        # 设置页面需要引用主窗口来切换主题
-        self._pages["settings"].set_main_window(self)
-
-        # ApiProxyPage 不再作为独立页面显示，但保留实例供仪表盘调用服务逻辑
+        # ApiProxyPage 不作为独立页面显示，但保留实例供仪表盘调用服务逻辑
         self._proxy_page = ApiProxyPage()
 
         # 仪表盘需要引用代理页面来控制服务
-        self._pages["dashboard"].set_proxy_page(self._proxy_page)
+        self._dashboard_page.set_proxy_page(self._proxy_page)
 
         # 代理页面需要引用仪表盘来同步控件值
-        self._proxy_page.set_dashboard_page(self._pages["dashboard"])
+        self._proxy_page.set_dashboard_page(self._dashboard_page)
 
         # 跨页面信号：积分更新互相同步
-        self._pages["accounts"].quota_updated.connect(self._on_accounts_quota_updated)
+        # 嵌入在 Dashboard 中的 AccountsPage 积分更新时刷新代理池
+        accounts_page = self._dashboard_page._accounts_page
+        if accounts_page:
+            accounts_page.quota_updated.connect(self._on_accounts_quota_updated)
         self._proxy_page.quota_updated.connect(self._on_proxy_quota_updated)
-
-        layout.addWidget(self._stack, 1)
-
-        # 默认显示仪表盘
-        self._stack.setCurrentWidget(self._pages["dashboard"])
 
     def _setup_tray(self):
         """设置系统托盘"""
@@ -376,8 +281,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_proxy_quota_updated(self):
-        """代理池页积分更新 → 刷新账号页"""
-        accounts_page = self._pages.get("accounts")
+        """代理池页积分更新 → 刷新额度管理（嵌入在 Dashboard 中）"""
+        accounts_page = self._dashboard_page._accounts_page if self._dashboard_page else None
         if accounts_page:
             try:
                 accounts_page._refresh_table()
@@ -391,12 +296,6 @@ class MainWindow(QMainWindow):
             # 手动检查才弹提示，自动检查不打扰
             QMessageBox.information(self, "检查更新", "✅ 当前已是最新版本！")
 
-    def _switch_page(self, page_id: str):
-        """切换页面"""
-        page = self._pages.get(page_id)
-        if page:
-            self._stack.setCurrentWidget(page)
-
     def apply_theme(self, theme: str):
         """应用主题"""
         self._current_theme = theme
@@ -405,13 +304,12 @@ class MainWindow(QMainWindow):
         if app:
             app.setStyleSheet(stylesheet)
         self.setStyleSheet(stylesheet)
-        # 通知各页面刷新动态颜色（硬编码样式的控件需要手动更新）
-        for page in self._pages.values():
-            if hasattr(page, "apply_theme"):
-                try:
-                    page.apply_theme()
-                except Exception:
-                    pass
+        # 通知 Dashboard 页面刷新动态颜色（含内嵌的额度管理）
+        if self._dashboard_page and hasattr(self._dashboard_page, "apply_theme"):
+            try:
+                self._dashboard_page.apply_theme()
+            except Exception:
+                pass
 
     def _show_window(self):
         """显示窗口"""
@@ -439,7 +337,15 @@ class MainWindow(QMainWindow):
         #    关闭本软件不应影响用户正在使用的 WorkBuddy
 
         # 3. 关闭所有 QThread（签到、查询等后台任务）
-        for page in self._pages.values():
+        # Dashboard 内嵌的 AccountsPage 可能有后台 worker
+        candidates = []
+        if self._dashboard_page:
+            candidates.append(self._dashboard_page)
+            if self._dashboard_page._accounts_page:
+                candidates.append(self._dashboard_page._accounts_page)
+        if self._proxy_page:
+            candidates.append(self._proxy_page)
+        for page in candidates:
             try:
                 if hasattr(page, '_worker') and page._worker:
                     page._worker.stop()
@@ -449,14 +355,6 @@ class MainWindow(QMainWindow):
                     page._batch_worker.stop()
             except Exception:
                 pass
-
-        # 3.5 停止自动签到定时器和 worker
-        try:
-            self._checkin_timer.stop()
-            if hasattr(self, '_auto_checkin_worker') and self._auto_checkin_worker:
-                self._auto_checkin_worker.stop()
-        except Exception:
-            pass
 
         # 5. 隐藏托盘图标
         try:

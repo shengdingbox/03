@@ -30,7 +30,7 @@ from typing import Optional
 
 import requests
 
-from ..models import Account, ResourcePackage, CheckinStatus
+from ..models import Account, ResourcePackage
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +45,6 @@ PUBLIC_API_BASE = _obf_get("PUBLIC_API_BASE")
 # === API 路径 ===
 BILLING_API_PATHS = {
     "user_resource": "/v2/billing/meter/get-user-resource",
-    "payment_type": "/v2/billing/meter/get-payment-type",
-    "checkin_status": "/v2/billing/meter/checkin-status",
-    "daily_checkin": "/v2/billing/meter/daily-checkin",
-    "dosage_notify": "/v2/billing/meter/get-dosage-notify",
 }
 
 PUBLIC_API_PATHS = {
@@ -524,111 +520,7 @@ class ApiClient:
             logger.error(f"解析用户资源数据失败: {e}")
             return {"success": False, "error": f"解析失败: {e}"}
 
-    def get_payment_type(self) -> dict:
-        """获取付费类型
-
-        Returns:
-            {"success": True, "payment_type": "free"|"pro"|"team"|"enterprise"}
-        """
-        result = self._billing_request(BILLING_API_PATHS["payment_type"])
-        if result:
-            data = result.get("data", {})
-            return {"success": True, "payment_type": data.get("paymentType", "unknown")}
-        return {"success": False, "error": "获取付费类型失败"}
-
-    def get_checkin_status(self) -> dict:
-        """获取签到状态
-
-        Returns:
-            CheckinStatus 的字典形式
-        """
-        result = self._billing_request(BILLING_API_PATHS["checkin_status"])
-        if not result:
-            return {"success": False, "error": "获取签到状态失败"}
-
-        try:
-            data = result.get("data", {})
-            status = CheckinStatus(
-                active=data.get("active", False),
-                today_checked_in=data.get("today_checked_in", False),
-                streak_days=data.get("streak_days", 0),
-                daily_credit=data.get("daily_credit", 0),
-                today_credit=data.get("today_credit", 0),
-                is_streak_day=data.get("is_streak_day", False),
-                next_streak_day=data.get("next_streak_day", 0),
-                streak_bonus_days=data.get("streak_bonus_days", 0),
-                streak_bonus_credit=data.get("streak_bonus_credit", 0),
-                week_checkin_days=data.get("week_checkin_days", 0),
-                week_progress=data.get("week_progress", [False]*7),
-                total_credits=data.get("total_credits", 0),
-                activity_name=data.get("activity_name", ""),
-            )
-            return {"success": True, "data": status}
-        except Exception as e:
-            logger.error(f"解析签到状态失败: {e}")
-            return {"success": False, "error": f"解析失败: {e}"}
-
-    def daily_checkin(self) -> dict:
-        """执行每日签到
-
-        API 行为：
-        - 签到成功: HTTP 200, code=0, data 含 credit/streak_days
-        - 今日已签到: HTTP 400, code=10001, msg="今天已签到，请明天再来"
-
-        Returns:
-            {"success": True, "credit": int, "streak_days": int}
-            {"success": True, "already": True}  -- 今日已签到
-            或 {"success": False, "error": str}
-        """
-        result = self._billing_request(BILLING_API_PATHS["daily_checkin"])
-        if not result:
-            return {"success": False, "error": "签到请求失败"}
-
-        code = result.get("code", -1)
-        msg = result.get("msg", "")
-
-        # 签到成功 (code=0)
-        if code == 0:
-            data = result.get("data", {})
-            return {
-                "success": True,
-                "credit": data.get("credit", 0),
-                "streak_days": data.get("streak_days", 0),
-                "is_streak_day": data.get("is_streak_day", False),
-            }
-
-        # 已签到：code=10001 是服务端返回的"今天已签到"错误码
-        if code == 10001:
-            logger.info(f"今日已签到: code={code}, msg={msg}")
-            return {"success": True, "already": True}
-
-        # 其他常见的已签到关键词检测
-        already_keywords = ["already", "已签", "已领", "重复签到", "今日已"]
-        if any(kw in msg.lower() for kw in [k.lower() for kw in already_keywords]):
-            logger.info(f"今日已签到(关键词): code={code}, msg={msg}")
-            return {"success": True, "already": True}
-
-        # 其他业务错误
-        logger.warning(f"签到返回业务错误: code={code}, msg={msg}")
-        return {"success": False, "error": f"签到失败: {msg} (code={code})"}
-
     # === 兼容旧接口 ===
-
-    def checkin(self) -> dict:
-        """兼容旧接口 - 执行每日签到"""
-        result = self.daily_checkin()
-        if result["success"]:
-            return {"success": True, "data": result}
-        return result
-
-    def get_quota(self) -> dict:
-        """兼容旧接口 - 获取配额信息"""
-        return self.get_user_resource()
-
-    def verify_token(self) -> bool:
-        """验证 token 是否有效（通过获取付费类型来验证）"""
-        result = self._billing_request(BILLING_API_PATHS["payment_type"], retry_on_401=False)
-        return result is not None
 
     @staticmethod
     def from_account(account: Account, proxy: Optional[str] = None) -> "ApiClient":

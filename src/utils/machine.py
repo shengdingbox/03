@@ -101,18 +101,6 @@ def _get_hostname() -> str:
         return ""
 
 
-def _to_base62(num: int) -> str:
-    """将大整数转为 Base62 字符串（0-9, a-z, A-Z），更短且不可逆"""
-    chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    if num == 0:
-        return "0"
-    result = []
-    while num > 0:
-        num, rem = divmod(num, 62)
-        result.append(chars[rem])
-    return "".join(reversed(result))
-
-
 # ─── 机器码读写（基于激活的 buddyKey，不再硬件计算） ───
 
 # 内存缓存，避免重复 IO
@@ -170,8 +158,3 @@ def get_machine_code() -> str:
     cached = _load_cached_machine_code()
     _cached_machine_code = cached
     return cached
-
-
-def get_short_machine_code() -> str:
-    """生成短机器码（取前 16 位，便于显示）"""
-    return (get_machine_code() or "")[:16]

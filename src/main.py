@@ -219,6 +219,26 @@ def main():
         font = QFont("Microsoft YaHei", 10)  # Windows 中文字体
     app.setFont(font)
 
+    # 启动时环境检测（代理软件 / Hook 工具 / 系统代理）
+    try:
+        from .utils.env_check import check_environment, format_env_warnings
+        env_result = check_environment()
+        env_text = format_env_warnings(env_result)
+        if env_text:
+            logger.info(f"[环境检测] {env_text}")
+            # 弹窗已关闭，检测结果只记录到日志
+    except Exception as e:
+        logger.warning(f"环境检测失败: {e}")
+
+    # 启动时预加载服务端地址列表（强制刷新缓存）
+    # 必须在 MainWindow 创建之前执行，否则 DashboardPage 初始化时 get_credits 会用到空列表
+    try:
+        from .utils.server_api import _fetch_server_list
+        servers = _fetch_server_list(force_refresh=True)
+        logger.info(f"[启动] 服务端地址列表加载完成: {len(servers)} 个地址")
+    except Exception as e:
+        logger.warning(f"[启动] 服务端地址列表加载失败: {e}")
+
     # 创建主窗口
     global _main_window
     _main_window = MainWindow()
@@ -241,24 +261,6 @@ def main():
         _single_instance_server.newConnection.connect(_on_new_connection)
 
     logger.info("BuddyToolNew 已启动")
-
-    # 启动时环境检测（代理软件 / Hook 工具 / 系统代理）
-    try:
-        from .utils.env_check import check_environment, format_env_warnings
-        env_result = check_environment()
-        env_text = format_env_warnings(env_result)
-        if env_text:
-            logger.info(f"[环境检测] {env_text}")
-            # 弹窗已关闭，检测结果只记录到日志
-    except Exception as e:
-        logger.warning(f"环境检测失败: {e}")
-
-    # 启动时补交未上报的使用量记录
-    try:
-        from .utils.usage_reporter import flush_pending_reports_async
-        flush_pending_reports_async()
-    except Exception as e:
-        logger.warning(f"补交使用量记录失败: {e}")
 
     # 运行 Qt 事件循环
     ret = app.exec()

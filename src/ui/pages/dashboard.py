@@ -247,10 +247,15 @@ class CheckableBox(QCheckBox):
 
 
 class DashboardPage(QWidget):
-    """仪表盘页面 — 纯本地数据概览，不自动发网络请求，支持响应式缩放"""
+    """仪表盘页面 — 服务控制 + 额度管理合并页面
 
-    _REF_WIDTH = 980    # 参考宽度（100%缩放时的可用内容宽度）
-    _MIN_SCALE = 0.7    # 最小缩放比例
+    顶部：积分余额、API 代理服务控制、客户端配置
+    底部：嵌入 AccountsPage 的消耗明细 + 缓存命中率图表
+    """
+
+    _REF_WIDTH = 536    # 参考宽度（100%缩放时的可用内容宽度，约 600-64 边距）
+    _REF_HEIGHT = 560   # 参考高度（100%缩放时的可用内容高度）
+    _MIN_SCALE = 0.5    # 最小缩放比例
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -260,6 +265,7 @@ class DashboardPage(QWidget):
         self._all_cards = []
         self._proxy_page = None  # ApiProxyPage 引用，由 MainWindow 注入
         self._credits_loaded = False  # 是否已从后端加载过积分
+        self._accounts_page = None  # 嵌入的 AccountsPage 引用，由 MainWindow 注入
         self._setup_ui()
         self._load_cached_credits()  # 启动时从本地缓存加载积分
 
@@ -273,16 +279,16 @@ class DashboardPage(QWidget):
         title.setObjectName("page_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("积分额度 · API 代理 · 使用统计")
+        subtitle = QLabel("API 代理 · 额度管理 · 消耗明细")
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
-        # 可滚动内容区域（兜底：极端窄窗口时允许滚动查看全部内容）
+        # 内容区域（不显示滚动条，内容自动缩放到窗口大小）
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # 内容区域
         self._content = QWidget()
@@ -291,42 +297,66 @@ class DashboardPage(QWidget):
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(20)
 
-        # === 激活卡密按钮 + 积分进度条 ===
-        quota_card = QFrame()
-        quota_card.setObjectName("proxy_control_card")
-        quota_layout = QHBoxLayout(quota_card)
-        quota_layout.setContentsMargins(20, 16, 20, 16)
-        quota_layout.setSpacing(16)
+        # === 积分卡片网格 (2x2) ===
+        quota_grid = QGridLayout()
+        quota_grid.setSpacing(10)
 
-        quota_icon_label = QLabel("💎")
-        quota_icon_label.setStyleSheet("font-size: 32px;")
-        quota_layout.addWidget(quota_icon_label)
+        def _make_quota_card(icon: str, title: str, value_label: QLabel, color_key: str):
+            """构建单个积分卡片"""
+            card = QFrame()
+            card.setObjectName("proxy_control_card")
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(14, 10, 14, 10)
+            lay.setSpacing(4)
 
-        quota_text_col = QVBoxLayout()
-        quota_text_col.setSpacing(6)
-        quota_text_col.addWidget(QLabel("积分包余额"))
-        self._quota_value_label = QLabel("--")
-        self._quota_value_label.setStyleSheet("font-size: 28px; font-weight: 700;")
-        self._quota_packages_label = QLabel("")
-        self._quota_packages_label.setStyleSheet("color: #9BA4B0; font-size: 13px;")
-        quota_text_col.addWidget(self._quota_value_label)
-        quota_text_col.addWidget(self._quota_packages_label)
-        quota_layout.addLayout(quota_text_col)
+            head = QHBoxLayout()
+            head.setSpacing(6)
+            ic = QLabel(icon)
+            ic.setStyleSheet("font-size: 16px;")
+            head.addWidget(ic)
+            t = QLabel(title)
+            t.setStyleSheet(
+                f"font-size: 12px; color: {self._colors['text_tertiary']};"
+            )
+            head.addWidget(t)
+            head.addStretch()
+            lay.addLayout(head)
 
+            value_label.setStyleSheet(
+                f"font-size: 20px; font-weight: 700; color: {self._colors[color_key]};"
+            )
+            lay.addWidget(value_label)
+            return card
+
+        self._quota_value_label = QLabel("--")        # 积分包余额
+        self._quota_recharged_label = QLabel("--")    # 累计充值
+        self._quota_used_label = QLabel("--")         # 已用
+        self._quota_today_label = QLabel("--")        # 今日已用
+
+        c_balance = _make_quota_card("💎", "积分包余额", self._quota_value_label, "text_primary")
+        c_recharged = _make_quota_card("💰", "累计充值", self._quota_recharged_label, "accent")
+        c_used = _make_quota_card("📉", "已用", self._quota_used_label, "warning")
+        c_today = _make_quota_card("📅", "今日已用", self._quota_today_label, "error")
+
+        quota_grid.addWidget(c_balance, 0, 0)
+        quota_grid.addWidget(c_recharged, 0, 1)
+        quota_grid.addWidget(c_used, 1, 0)
+        quota_grid.addWidget(c_today, 1, 1)
+        content_layout.addLayout(quota_grid)
+
+        # 积分进度条已删除，保留隐藏占位引用避免外部代码报错
         self._quota_progress = QProgressBar()
-        self._quota_progress.setRange(0, 100)
-        self._quota_progress.setValue(0)
-        self._quota_progress.setTextVisible(False)
-        self._quota_progress.setFixedHeight(8)
-        quota_layout.addWidget(self._quota_progress, 1)
+        self._quota_progress.setVisible(False)
 
-        # 隐藏徽章（保留引用避免报错）
+        # 隐藏徽章和旧套餐描述（保留引用避免报错）
         self._quota_badge_label = QLabel("--")
         self._quota_badge_label.setVisible(False)
+        self._quota_packages_label = QLabel("")
+        self._quota_packages_label.setVisible(False)
 
-        # 按钮列：激活卡密 + 刷新积分
-        btn_col = QVBoxLayout()
-        btn_col.setSpacing(8)
+        # 按钮行：激活卡密 + 刷新积分
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
 
         # 激活卡密按钮
         self._btn_activate = QPushButton(f"🔑 {t('accounts.add_account')}")
@@ -348,7 +378,7 @@ class DashboardPage(QWidget):
             }}
         """)
         self._btn_activate.clicked.connect(self._activate_card)
-        btn_col.addWidget(self._btn_activate)
+        btn_row.addWidget(self._btn_activate)
 
         # 刷新积分按钮
         self._btn_refresh_credits = QPushButton("🔄 刷新积分")
@@ -369,171 +399,25 @@ class DashboardPage(QWidget):
             }}
         """)
         self._btn_refresh_credits.clicked.connect(self._refresh_credits)
-        btn_col.addWidget(self._btn_refresh_credits)
+        btn_row.addWidget(self._btn_refresh_credits)
 
-        quota_layout.addLayout(btn_col)
+        btn_row.addStretch()
+        content_layout.addLayout(btn_row)
 
-        content_layout.addWidget(quota_card)
-
-        # === API 代理服务控制区 ===
+        # === 客户端配置区（写入 WorkBuddy / CodeBuddy 的 models.json）===
         self._proxy_control_card = QFrame()
         self._proxy_control_card.setObjectName("proxy_control_card")
         proxy_ctrl_layout = QVBoxLayout(self._proxy_control_card)
         proxy_ctrl_layout.setSpacing(10)
 
-        # 端口和访问控制
-        proxy_config_row = QHBoxLayout()
-        proxy_config_row.addWidget(QLabel("端口:"))
-        self._port_spin = QSpinBox()
-        self._port_spin.setRange(1024, 65535)
-        self._port_spin.setValue(int(load_setting("proxy_port", "8002")))
-        self._port_spin.valueChanged.connect(lambda _: self._on_port_changed())
-        proxy_config_row.addWidget(self._port_spin)
-
-        proxy_config_row.addWidget(QLabel("  "))
-
-        self._proxy_status_label = QLabel("⏹ 已停止")
-        self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-        proxy_config_row.addWidget(self._proxy_status_label)
-
-        self._toggle_proxy_btn = QPushButton("▶ 启动服务")
-        self._toggle_proxy_btn.setObjectName("primary_btn")
-        self._toggle_proxy_btn.setCursor(Qt.PointingHandCursor)
-        self._toggle_proxy_btn.setMinimumHeight(36)
-        self._toggle_proxy_btn.setMinimumWidth(100)
-        self._toggle_proxy_btn.clicked.connect(self._toggle_proxy_service)
-        self._apply_toggle_btn_style()
-        proxy_config_row.addWidget(self._toggle_proxy_btn)
-
-        proxy_config_row.addStretch()
-
-        proxy_ctrl_layout.addLayout(proxy_config_row)
-
-        # 服务 URL 显示
-        proxy_url_row = QHBoxLayout()
-        proxy_url_row.addWidget(QLabel("接口地址:"))
-        self._proxy_url_label = QLabel(f"http://127.0.0.1:{int(load_setting('proxy_port', '8002'))}/v1/chat/completions")
-        self._proxy_url_label.setStyleSheet("color: #2B6CB0; font-weight: 600; font-size: 13px;")
-        self._proxy_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        proxy_url_row.addWidget(self._proxy_url_label)
-
-        btn_copy_proxy_url = QPushButton("📋 复制")
-        btn_copy_proxy_url.setCursor(Qt.PointingHandCursor)
-        btn_copy_proxy_url.setFixedWidth(60)
-        btn_copy_proxy_url.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {self._colors['accent']};
-                border: 1px solid {self._colors['accent']};
-                border-radius: 6px;
-                padding: 6px 10px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['accent_light']};
-            }}
-        """)
-        btn_copy_proxy_url.clicked.connect(self._copy_proxy_url)
-        proxy_url_row.addWidget(btn_copy_proxy_url)
-
-        proxy_url_row.addStretch()
-        proxy_ctrl_layout.addLayout(proxy_url_row)
-
-        # 子 API Key 行
-        subkey_row = QHBoxLayout()
-        subkey_row.addWidget(QLabel("API Key:"))
-        self._subkey_label = QLabel("sk-")
-        self._subkey_label.setStyleSheet("color: #805AD5; font-weight: 600; font-size: 13px;")
-        self._subkey_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        subkey_row.addWidget(self._subkey_label)
-
-        btn_copy_subkey = QPushButton("📋 复制")
-        btn_copy_subkey.setCursor(Qt.PointingHandCursor)
-        btn_copy_subkey.setFixedWidth(60)
-        btn_copy_subkey.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {self._colors['accent']};
-                border: 1px solid {self._colors['accent']};
-                border-radius: 6px;
-                padding: 6px 10px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['accent_light']};
-            }}
-        """)
-        btn_copy_subkey.clicked.connect(self._copy_subkey)
-        subkey_row.addWidget(btn_copy_subkey)
-
-        subkey_row.addStretch()
-        proxy_ctrl_layout.addLayout(subkey_row)
-
-        # === 客户端配置（同一个 card 内） ===
         import getpass
         _username = getpass.getuser()
 
-        # 模型前缀输入框（放到复制配置前面的 action_row 中）
-
-        client_title = QLabel("选择目标客户端（可多选）")
-        client_title.setStyleSheet(
-            f"font-size: 13px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-        proxy_ctrl_layout.addWidget(client_title)
-
-        # 复选框样式 — 带对号
-        # WorkBuddy
-        self._chk_workbuddy = CheckableBox(
-            f"WorkBuddy  腾讯代码助手桌面版  ✓ C:\\Users\\{_username}\\.workbuddy",
-            self._colors['accent'], self._colors['border'], self._colors['text_primary']
-        )
-        self._chk_workbuddy.setChecked(load_setting("config_target_workbuddy", "true") == "true")
-        self._chk_workbuddy.toggled.connect(lambda checked: save_setting("config_target_workbuddy", "true" if checked else "false"))
-        proxy_ctrl_layout.addWidget(self._chk_workbuddy)
-
-        # CodeBuddy
-        self._chk_codebuddy = CheckableBox(
-            f"CodeBuddy  腾讯云 AI IDE 插件  ✓ C:\\Users\\{_username}\\.codebuddy",
-            self._colors['accent'], self._colors['border'], self._colors['text_primary']
-        )
-        self._chk_codebuddy.setChecked(load_setting("config_target_codebuddy", "true") == "true")
-        self._chk_codebuddy.toggled.connect(lambda checked: save_setting("config_target_codebuddy", "true" if checked else "false"))
-        proxy_ctrl_layout.addWidget(self._chk_codebuddy)
-
-        # 自动备份 + 打开备份目录
-        self._chk_auto_backup = CheckableBox(
-            "配置前自动备份原文件（推荐）",
-            self._colors['accent'], self._colors['border'], self._colors['text_primary']
-        )
-        self._chk_auto_backup.setChecked(load_setting("config_auto_backup", "true") == "true")
-        self._chk_auto_backup.toggled.connect(lambda checked: save_setting("config_auto_backup", "true" if checked else "false"))
-
-        backup_row = QHBoxLayout()
-        backup_row.addWidget(self._chk_auto_backup)
-        backup_row.addStretch()
-        btn_open_backup = QPushButton("打开备份目录")
-        btn_open_backup.setCursor(Qt.PointingHandCursor)
-        btn_open_backup.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {self._colors['text_primary']};
-                border: 1px solid {self._colors['border']};
-                border-radius: 6px;
-                padding: 6px 14px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['bg_hover']};
-            }}
-        """)
-        btn_open_backup.clicked.connect(self._open_backup_dir)
-        backup_row.addWidget(btn_open_backup)
-        proxy_ctrl_layout.addLayout(backup_row)
-
-        # 底部按钮：复制配置 / 删除配置 / 立即配置
-        action_row = QHBoxLayout()
-
-        # 模型前缀输入框（短小，放在复制配置前）
+        # === 模型前缀输入框 ===
+        prefix_row = QHBoxLayout()
         prefix_label = QLabel("模型前缀:")
         prefix_label.setStyleSheet("font-size: 12px; font-weight: 600;")
-        action_row.addWidget(prefix_label)
+        prefix_row.addWidget(prefix_label)
         self._model_prefix_input = QLineEdit()
         self._model_prefix_input.setPlaceholderText("不知道这是啥 不要动")
         self._model_prefix_input.setText(load_setting("model_prefix", ""))
@@ -551,82 +435,80 @@ class DashboardPage(QWidget):
                 color: #E53E3E;
             }}
         """)
-        action_row.addWidget(self._model_prefix_input)
+        prefix_row.addWidget(self._model_prefix_input)
+        prefix_row.addStretch()
+        proxy_ctrl_layout.addLayout(prefix_row)
 
-        action_row.addStretch()
-
-        btn_copy_config = QPushButton("复制配置")
-        btn_copy_config.setCursor(Qt.PointingHandCursor)
-        btn_copy_config.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self._colors['bg_secondary']};
-                color: {self._colors['text_primary']};
-                border: 1px solid {self._colors['border']};
-                border-radius: 6px;
-                padding: 8px 18px;
-                font-size: 13px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['bg_hover']};
-            }}
-        """)
-        btn_copy_config.clicked.connect(self._copy_config)
-        action_row.addWidget(btn_copy_config)
-
-        btn_delete_config = QPushButton("删除配置")
-        btn_delete_config.setCursor(Qt.PointingHandCursor)
-        btn_delete_config.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self._colors['bg_secondary']};
-                color: {self._colors['text_primary']};
-                border: 1px solid {self._colors['border']};
-                border-radius: 6px;
-                padding: 8px 18px;
-                font-size: 13px;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['bg_hover']};
-            }}
-        """)
-        btn_delete_config.clicked.connect(self._delete_config)
-        action_row.addWidget(btn_delete_config)
-
-        btn_apply_config = QPushButton("立即配置")
-        btn_apply_config.setCursor(Qt.PointingHandCursor)
-        btn_apply_config.setStyleSheet(f"""
+        # === 客户端配置按钮：配置 WorkBuddy / 配置 CodeBuddy / 还原配置 / 打开备份目录 ===
+        _btn_style = f"""
             QPushButton {{
                 background-color: {self._colors['accent']};
                 color: #FFFFFF;
                 border: none;
-                border-radius: 6px;
-                padding: 8px 24px;
+                border-radius: 8px;
+                padding: 8px 18px;
                 font-size: 13px;
                 font-weight: 600;
             }}
             QPushButton:hover {{
                 background-color: {self._colors['accent_hover']};
             }}
-        """)
-        btn_apply_config.clicked.connect(self._apply_config)
-        action_row.addWidget(btn_apply_config)
+        """
+        client_btn_row = QHBoxLayout()
+        client_btn_row.setSpacing(10)
 
-        proxy_ctrl_layout.addLayout(action_row)
+        self._btn_config_workbuddy = QPushButton("配置 WorkBuddy")
+        self._btn_config_workbuddy.setCursor(Qt.PointingHandCursor)
+        self._btn_config_workbuddy.setMinimumHeight(40)
+        self._btn_config_workbuddy.setStyleSheet(_btn_style)
+        self._btn_config_workbuddy.clicked.connect(lambda: self._apply_config("workbuddy"))
+        client_btn_row.addWidget(self._btn_config_workbuddy)
+
+        self._btn_config_codebuddy = QPushButton("配置 CodeBuddy")
+        self._btn_config_codebuddy.setCursor(Qt.PointingHandCursor)
+        self._btn_config_codebuddy.setMinimumHeight(40)
+        self._btn_config_codebuddy.setStyleSheet(_btn_style)
+        self._btn_config_codebuddy.clicked.connect(lambda: self._apply_config("codebuddy"))
+        client_btn_row.addWidget(self._btn_config_codebuddy)
+
+        self._btn_restore_config = QPushButton("还原配置")
+        self._btn_restore_config.setCursor(Qt.PointingHandCursor)
+        self._btn_restore_config.setMinimumHeight(40)
+        self._btn_restore_config.setStyleSheet(_btn_style)
+        self._btn_restore_config.clicked.connect(self._restore_config)
+        client_btn_row.addWidget(self._btn_restore_config)
+
+        self._btn_open_backup = QPushButton("打开备份目录")
+        self._btn_open_backup.setCursor(Qt.PointingHandCursor)
+        self._btn_open_backup.setMinimumHeight(40)
+        self._btn_open_backup.setStyleSheet(_btn_style)
+        self._btn_open_backup.clicked.connect(self._open_backup_dir)
+        client_btn_row.addWidget(self._btn_open_backup)
+
+        client_btn_row.addStretch()
+        proxy_ctrl_layout.addLayout(client_btn_row)
+
+        # 客户端路径提示
+        path_hint = QLabel(
+            f"WorkBuddy: C:\\Users\\{_username}\\.workbuddy\\models.json    "
+            f"CodeBuddy: C:\\Users\\{_username}\\.codebuddy\\models.json"
+        )
+        path_hint.setStyleSheet(f"font-size: 11px; color: {self._colors['text_tertiary']};")
+        proxy_ctrl_layout.addWidget(path_hint)
+
+        # 自动备份复选框已删除 — 默认每次配置都自动备份
+        self._chk_auto_backup = CheckableBox(
+            "auto_backup", self._colors['accent'], self._colors['border'], self._colors['text_primary']
+        )
+        self._chk_auto_backup.setChecked(True)
+        self._chk_auto_backup.setVisible(False)
 
         content_layout.addWidget(self._proxy_control_card)
 
-        # === 诊断项定义（名称, 描述）— 弹窗形式，启动服务时展示 ===
-        self._diag_items_def = [
-            ("服务端口监听检查",  "端口 {port} 正在监听"),
-            ("HTTP 接口健康检查",  "接口响应正常"),
-            ("端口占用检测",       "端口 {port} 未被占用"),
-            ("Windows 端口预留检查","端口 {port} 不在系统预留段内"),
-            ("系统代理检测",       "系统代理未开启"),
-            ("Windows 防火墙状态", "所有防火墙配置文件均已关闭"),
-            ("hosts 文件检查",     "hosts 文件无异常"),
-            ("云端服务连通性",     "云端服务端口可达"),
-        ]
-        self._diag_dialog = None
-        self._diag_rows = []
+        # === 额度管理（嵌入 AccountsPage 内容：消耗明细 + 缓存命中率图表）===
+        from .accounts import AccountsPage
+        self._accounts_page = AccountsPage(self, embedded=True)
+        content_layout.addWidget(self._accounts_page)
 
         content_layout.addStretch()
 
@@ -647,15 +529,20 @@ class DashboardPage(QWidget):
         self._apply_responsive_scale()
 
     def _apply_responsive_scale(self):
-        """根据当前可用宽度计算缩放比例并应用到所有UI元素"""
+        """根据当前可用宽度和高度计算缩放比例并应用到所有UI元素
+
+        取宽度和高度方向缩放比例的较小值，确保内容不超出可视区域、不出现滚动条。
+        """
         # 安全检查：UI 未完全初始化时跳过（resizeEvent 可能在 _setup_ui 期间被触发）
         if not getattr(self, '_all_cards', None):
             return
-        w = self.width()
-        if w <= 0:
-            w = self._REF_WIDTH
-        available = w - 64  # 减去内容区域左右边距 (32*2)
-        self._scale = max(self._MIN_SCALE, min(1.0, available / self._REF_WIDTH))
+        w = self.width() if self.width() > 0 else self._REF_WIDTH
+        h = self.height() if self.height() > 0 else self._REF_HEIGHT
+        available_w = w - 64  # 减去内容区域左右边距 (32*2)
+        available_h = h - 20   # 减去顶部间距
+        scale_w = available_w / self._REF_WIDTH
+        scale_h = available_h / self._REF_HEIGHT
+        self._scale = max(self._MIN_SCALE, min(1.0, scale_w, scale_h))
         s = self._scale
 
         # 缩放所有静态卡片
@@ -740,11 +627,17 @@ class DashboardPage(QWidget):
         for card in self._all_cards:
             card.apply_theme(self._colors)
 
-        # 刷新代理按钮样式
-        self._apply_toggle_btn_style()
-
         # 重新应用响应式缩放（会刷新所有带缩放的样式）
         self._apply_responsive_scale()
+
+        # 嵌入的 AccountsPage 也刷新主题
+        if self._accounts_page:
+            try:
+                self._accounts_page._colors = self._colors
+                if hasattr(self._accounts_page, '_apply_cache_frame_style'):
+                    self._accounts_page._apply_cache_frame_style()
+            except Exception:
+                pass
 
     # === 数字格式化（保留静态方法供其他页面调用） ===
 
@@ -794,14 +687,16 @@ class DashboardPage(QWidget):
                 self._render_credits(cached)
             else:
                 self._quota_value_label.setText("--")
-                self._quota_packages_label.setText("点击 🔄 刷新查询")
+                self._quota_recharged_label.setText("--")
+                self._quota_used_label.setText("--")
+                self._quota_today_label.setText("--")
                 self._quota_badge_label.setText("--")
                 self._quota_progress.setValue(0)
         except Exception:
             pass
 
     def _render_credits(self, data: dict):
-        """渲染积分余额到 UI"""
+        """渲染积分余额到 UI（4 个卡片）"""
         if not data or "credits" not in data:
             return
         credits = float(data.get("credits", 0))
@@ -810,22 +705,19 @@ class DashboardPage(QWidget):
         today_used = float(data.get("todayUsed", 0))
 
         self._quota_value_label.setText(f"{credits:.2f}")
+        self._quota_recharged_label.setText(f"{total_recharged:.0f}")
+        self._quota_used_label.setText(f"{total_used:.0f}")
+        self._quota_today_label.setText(f"{today_used:.0f}")
+
+        # 兼容旧字段（隐藏占位）
         self._quota_packages_label.setText(
             f"累计充值 {total_recharged:.0f} · 已用 {total_used:.0f} · 今日 {today_used:.0f}"
         )
 
         if credits <= 0:
             self._quota_badge_label.setText("已耗尽")
-            self._quota_badge_label.setStyleSheet(
-                "background-color: rgba(229,62,62,0.12); color: #E53E3E; "
-                "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-            )
         else:
             self._quota_badge_label.setText(f"剩余 {credits:.0f}")
-            self._quota_badge_label.setStyleSheet(
-                "background-color: rgba(56,161,105,0.1); color: #38A169; "
-                "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-            )
 
         if total_recharged > 0:
             percent = int(min(100, max(0, (credits / total_recharged) * 100)))
@@ -841,7 +733,9 @@ class DashboardPage(QWidget):
 
         self._btn_refresh_credits.setEnabled(False)
         self._quota_value_label.setText("⏳")
-        self._quota_packages_label.setText("查询中...")
+        self._quota_recharged_label.setText("--")
+        self._quota_used_label.setText("--")
+        self._quota_today_label.setText("--")
         self._quota_badge_label.setText("--")
         self._quota_progress.setValue(0)
 
@@ -873,20 +767,12 @@ class DashboardPage(QWidget):
             except Exception:
                 pass
             self._render_credits(result)
-
-            # 余额 > 10 且服务未运行时，自动启动服务
-            try:
-                balance = float(result.get("credits", 0))
-            except (TypeError, ValueError):
-                balance = 0.0
-
-            if balance > 10 and self._proxy_page:
-                ps = self._proxy_page._proxy_server
-                if not (ps and ps.is_running):
-                    self._toggle_proxy_service()
         else:
             err = result.get("error", "无响应") if result else "无响应"
             self._quota_value_label.setText("--")
+            self._quota_recharged_label.setText("--")
+            self._quota_used_label.setText("--")
+            self._quota_today_label.setText("--")
             self._quota_packages_label.setText(f"查询失败: {err[:40]}")
             self._quota_badge_label.setText("错误")
             self._quota_progress.setValue(0)
@@ -897,371 +783,12 @@ class DashboardPage(QWidget):
         dialog = AddAccountDialog(self)
         def _on_account_added(_):
             self._refresh_credits()
-            self._refresh_subkey_display()
         dialog.account_added.connect(_on_account_added)
         dialog.exec()
 
     def set_proxy_page(self, proxy_page):
-        """注入 ApiProxyPage 引用，用于服务控制"""
+        """注入 ApiProxyPage 引用（保留接口兼容，不再用于服务控制）"""
         self._proxy_page = proxy_page
-
-    def _build_diag_row(self, name: str, desc: str) -> tuple:
-        """构建诊断项单行（状态徽章 + 名称 + 描述），返回 (row_layout, badge_label, name_label, desc_label)"""
-        row = QHBoxLayout()
-        row.setSpacing(12)
-
-        # 状态徽章（初始=灰色"检测中"）
-        badge_style = (
-            "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
-            "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-        )
-        badge = QLabel("检测中")
-        badge.setStyleSheet(badge_style)
-        badge.setFixedWidth(54)
-        badge.setAlignment(Qt.AlignCenter)
-        row.addWidget(badge)
-
-        # 右侧：名称 + 描述（垂直堆叠）
-        text_col = QVBoxLayout()
-        text_col.setSpacing(2)
-        name_label = QLabel(name)
-        name_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-        text_col.addWidget(name_label)
-        desc_label = QLabel("")
-        desc_label.setStyleSheet(
-            f"font-size: 12px; color: {self._colors['text_tertiary']};"
-        )
-        desc_label.setWordWrap(True)
-        text_col.addWidget(desc_label)
-        row.addLayout(text_col, 1)
-
-        return (row, badge, name_label, desc_label)
-
-    def _set_diag_row_status(self, idx: int, status: str, kind: str):
-        """更新诊断项的状态徽章颜色"""
-        if idx >= len(self._diag_rows):
-            return
-        badge = self._diag_rows[idx][1]
-        badge.setText(status)
-        if kind == "success":
-            badge.setStyleSheet(
-                "background-color: rgba(56,161,105,0.15); color: #38A169; "
-                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-            )
-        elif kind == "error":
-            badge.setStyleSheet(
-                "background-color: rgba(229,62,62,0.12); color: #E53E3E; "
-                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-            )
-        else:  # pending
-            badge.setStyleSheet(
-                "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
-                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-            )
-
-    def _show_loading_dialog(self, text: str = "正在启动服务..."):
-        """创建并显示加载弹窗（带旋转动画）"""
-        self._loading_dialog = QDialog(self)
-        self._loading_dialog.setWindowTitle("请稍候")
-        self._loading_dialog.setModal(True)
-        self._loading_dialog.setMinimumWidth(320)
-        self._loading_dialog.setWindowFlags(
-            self._loading_dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
-        )
-
-        layout = QVBoxLayout(self._loading_dialog)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # 旋转加载图标
-        from PySide6.QtCore import QPropertyAnimation, QByteArray
-        self._loading_spinner = QLabel("◐")
-        self._loading_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loading_spinner.setStyleSheet(f"font-size: 36px; color: {self._colors['accent']};")
-        layout.addWidget(self._loading_spinner)
-
-        # 旋转动画
-        self._loading_anim = QPropertyAnimation(
-            self._loading_spinner, QByteArray(b"rotation")
-        )
-        # QLabel 没有 rotation 属性，用定时器旋转文字替代
-        from PySide6.QtCore import QTimer
-        self._loading_chars = ["◐", "◓", "◑", "◒"]
-        self._loading_idx = 0
-        self._loading_timer = QTimer()
-        self._loading_timer.timeout.connect(self._rotate_loading)
-        self._loading_timer.start(150)
-
-        # 提示文字
-        self._loading_label = QLabel(text)
-        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loading_label.setStyleSheet(
-            f"font-size: 14px; font-weight: 500; color: {self._colors['text_primary']};"
-        )
-        layout.addWidget(self._loading_label)
-
-        self._loading_dialog.show()
-
-    def _rotate_loading(self):
-        """旋转加载图标"""
-        self._loading_idx = (self._loading_idx + 1) % len(self._loading_chars)
-        self._loading_spinner.setText(self._loading_chars[self._loading_idx])
-
-    def _update_loading_text(self, text: str):
-        """更新加载弹窗提示文字"""
-        if hasattr(self, '_loading_label') and self._loading_label:
-            self._loading_label.setText(text)
-
-    def _close_loading_dialog(self):
-        """关闭加载弹窗"""
-        if hasattr(self, '_loading_timer') and self._loading_timer:
-            self._loading_timer.stop()
-        if hasattr(self, '_loading_dialog') and self._loading_dialog:
-            self._loading_dialog.close()
-            self._loading_dialog.deleteLater()
-            self._loading_dialog = None
-            self._loading_label = None
-            self._loading_spinner = None
-
-    def _show_diag_dialog(self, port: int):
-        """创建并显示诊断弹窗"""
-        self._diag_dialog = QDialog(self)
-        self._diag_dialog.setWindowTitle("服务启动中")
-        self._diag_dialog.setModal(True)
-        self._diag_dialog.setMinimumWidth(420)
-        self._diag_dialog.setWindowFlags(
-            self._diag_dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
-        )
-
-        layout = QVBoxLayout(self._diag_dialog)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        self._diag_title = QLabel("🔍 服务启动中...")
-        self._diag_title.setStyleSheet(
-            f"font-size: 15px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-        layout.addWidget(self._diag_title)
-
-        # 构建诊断行
-        self._diag_rows = []
-        for name, desc_template in self._diag_items_def:
-            row, badge, name_label, desc_label = self._build_diag_row(name, "")
-            layout.addLayout(row)
-            self._diag_rows.append((row, badge, name_label, desc_label))
-
-        self._diag_dialog.show()
-
-    def _close_diag_dialog(self):
-        """关闭诊断弹窗"""
-        if self._diag_dialog:
-            self._diag_dialog.close()
-            self._diag_dialog.deleteLater()
-            self._diag_dialog = None
-
-    def _toggle_proxy_service(self):
-        """启动/停止代理服务"""
-        if not self._proxy_page:
-            return
-
-        ps = self._proxy_page._proxy_server
-        if ps and ps.is_running:
-            # 服务运行中 → 停止
-            self._proxy_page._toggle_service()
-            self._sync_proxy_status()
-            return
-
-        # 服务未运行 → 同步模型前缀到 ProxyDatabase
-        model_prefix = self._model_prefix_input.text().strip()
-        save_setting("model_prefix", model_prefix)
-        try:
-            db = ProxyDatabase.get_instance()
-            db.update_settings({"model_prefix": model_prefix})
-        except Exception:
-            pass
-
-        # 保存客户端勾选状态并自动同步配置到所选客户端
-        self._save_client_config()
-        self._auto_sync_config_before_start()
-
-        # 显示加载弹窗
-        port = self._port_spin.value()
-        self._show_loading_dialog("正在启动服务...")
-        self._toggle_proxy_btn.setEnabled(False)
-        self._proxy_status_label.setText("⏳ 正在启动...")
-        self._proxy_status_label.setStyleSheet("font-weight: 600; color: #D69E2E;")
-
-        # 直接启动代理服务（buddyKey 在激活卡密时已写入上游 Key 池，无需再获取）
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(300, lambda: self._on_service_started(True))
-
-    def _auto_sync_config_before_start(self):
-        """启动服务前自动同步配置到所选客户端（根据勾选）
-
-        与 _apply_config 类似，但不弹确认窗、不弹成功提示，
-        只在后台静默写入 models.json + 配置调试端口。
-        """
-        self._save_client_config()
-        if not self._proxy_page:
-            return
-
-        from pathlib import Path
-        import os
-        from datetime import datetime
-        from shutil import copy2
-
-        # 检查是否有勾选目标
-        targets = []
-        if self._chk_workbuddy.isChecked():
-            targets.append(("WorkBuddy", Path.home() / ".workbuddy"))
-        if self._chk_codebuddy.isChecked():
-            targets.append(("CodeBuddy", Path.home() / ".codebuddy"))
-
-        if not targets:
-            return
-
-        # 生成配置 JSON
-        try:
-            config_json = self._build_config_json()
-        except Exception as e:
-            logger.warning(f"启动服务时生成配置 JSON 失败: {e}")
-            return
-
-        # 自动备份
-        if self._chk_auto_backup.isChecked():
-            backup_root = Path.home() / ".buddytoolnew" / "config_backups"
-            backup_root.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for name, target_dir in targets:
-                src = target_dir / "models.json"
-                if src.exists():
-                    dst = backup_root / f"{name.lower()}_{ts}.json"
-                    try:
-                        copy2(str(src), str(dst))
-                    except Exception as e:
-                        logger.warning(f"备份 {name} 配置失败: {e}")
-
-        # 写入配置
-        for name, target_dir in targets:
-            try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_path = target_dir / "models.json"
-                target_path.write_text(config_json, encoding="utf-8")
-                logger.info(f"启动服务: 已同步配置到 {name}")
-            except Exception as e:
-                logger.warning(f"启动服务: 同步配置到 {name} 失败: {e}")
-
-        # 如果勾选了 WorkBuddy，后台配置调试端口并重启（静默，不弹窗）
-        if self._chk_workbuddy.isChecked():
-            from PySide6.QtCore import QThread, Signal as QSignal
-
-            class _SilentWorkbuddySetupThread(QThread):
-                done = QSignal(bool, str)
-
-                def run(self):
-                    try:
-                        from ...utils.setup_debug_port import setup_and_restart
-                        ok, msg = setup_and_restart()
-                        self.done.emit(ok, msg)
-                    except Exception as e:
-                        self.done.emit(False, str(e))
-
-            self._silent_workbuddy_thread = _SilentWorkbuddySetupThread()
-            self._silent_workbuddy_thread.done.connect(
-                lambda ok, msg: logger.info(f"启动服务: WorkBuddy 配置 {'成功' if ok else '失败'} - {msg}")
-            )
-            self._silent_workbuddy_thread.finished.connect(
-                lambda: setattr(self, '_silent_workbuddy_thread', None)
-            )
-            self._silent_workbuddy_thread.start()
-
-    def _on_service_started(self, success: bool):
-        """服务启动完成回调（在主线程执行）"""
-        if not success:
-            self._proxy_status_label.setText("⏹ 已停止")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_proxy_btn.setEnabled(True)
-            self._close_loading_dialog()
-            QMessageBox.warning(self, "启动失败", "服务启动过程中发生错误")
-            return
-
-        # 启动代理服务（快速操作，不阻塞）
-        self._proxy_page._toggle_service()
-        self._toggle_proxy_btn.setEnabled(True)
-        self._sync_proxy_status()
-        # 刷新子 API Key 显示（确保显示 buddyKey）
-        self._refresh_subkey_display()
-
-        # 关闭加载弹窗
-        self._close_loading_dialog()
-
-    def _apply_toggle_btn_style(self):
-        """根据服务状态设置按钮内联样式"""
-        if not self._proxy_page:
-            return
-        ps = self._proxy_page._proxy_server
-        if ps and ps.is_running:
-            self._toggle_proxy_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {self._colors['error']};
-                    color: #FFFFFF;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 8px 16px;
-                    font-size: 13px;
-                    font-weight: 600;
-                }}
-                QPushButton:hover {{
-                    background-color: {self._colors['error']};
-                    opacity: 0.9;
-                }}
-            """)
-        else:
-            self._toggle_proxy_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {self._colors['accent']};
-                    color: #FFFFFF;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 8px 16px;
-                    font-size: 13px;
-                    font-weight: 600;
-                }}
-                QPushButton:hover {{
-                    background-color: {self._colors['accent_hover']};
-                }}
-            """)
-
-    def _copy_proxy_url(self):
-        """复制服务地址 — 转发给 ApiProxyPage"""
-        if self._proxy_page:
-            self._proxy_page._copy_url()
-        else:
-            from PySide6.QtWidgets import QApplication
-            QApplication.clipboard().setText(self._proxy_url_label.text())
-
-    def _copy_subkey(self):
-        """复制子 API Key"""
-        from PySide6.QtWidgets import QApplication
-        key = self._subkey_label.text()
-        if key and key != "sk-":
-            QApplication.clipboard().setText(key)
-
-    def _refresh_subkey_display(self):
-        """刷新 API Key 显示 — 只显示 buddyKey（机器码）"""
-        if not self._proxy_page:
-            return
-        from ...utils.machine import get_machine_code
-        machine_code = get_machine_code()
-        if machine_code:
-            logger.info(f"[_refresh_subkey_display] 显示 buddyKey: {machine_code[:16]}... (长度 {len(machine_code)})")
-            self._subkey_label.setText(machine_code)
-        else:
-            logger.info("[_refresh_subkey_display] 未激活，buddyKey 为空")
-            self._subkey_label.setText("未激活（请先激活卡密）")
 
     def _open_backup_dir(self):
         """打开备份目录"""
@@ -1273,9 +800,6 @@ class DashboardPage(QWidget):
 
     def _save_client_config(self):
         """保存客户端配置选项"""
-        save_setting("config_target_workbuddy", "true" if self._chk_workbuddy.isChecked() else "false")
-        save_setting("config_target_codebuddy", "true" if self._chk_codebuddy.isChecked() else "false")
-        save_setting("config_auto_backup", "true" if self._chk_auto_backup.isChecked() else "false")
         model_prefix = self._model_prefix_input.text().strip()
         save_setting("model_prefix", model_prefix)
         # 同步写入 ProxyDatabase，代理服务请求上游时用这个去掉前缀
@@ -1286,22 +810,47 @@ class DashboardPage(QWidget):
             pass
 
     def _build_config_json(self) -> str:
-        """根据当前端口、子 API Key 和服务端模型列表生成配置 JSON"""
+        """根据当前端口、子 API Key 和服务端模型列表生成配置 JSON
+
+        取消本地代理：直接使用上游 API 地址 + 上游 Key 池中第一个可用 Key 作为 apiKey，
+        客户端（WorkBuddy / CodeBuddy）直接请求上游，不再经过本工具的代理服务。
+        """
         import json
         import secrets as _sec
         from datetime import datetime
-        from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
+        from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS, ProxyDatabase
 
-        port = self._port_spin.value()
-        # 只用 buddyKey（机器码）作为 API Key
-        from ...utils.machine import get_machine_code
-        api_key = get_machine_code()
+        # 从上游 Key 池中获取第一个可用 Key 作为 apiKey
+        api_key = ""
+        try:
+            db = ProxyDatabase.get_instance()
+            upstream_keys = db.get_upstream_keys()
+            for k in upstream_keys:
+                if k.get("status", "active") == "active" and k.get("api_key"):
+                    api_key = k["api_key"]
+                    break
+        except Exception:
+            pass
+
         if not api_key:
-            # 未激活，无法生成配置
-            logger.warning("[_build_config_json] buddyKey 为空，未激活")
-            api_key = "未激活"
+            # Key 池为空时退化为机器码占位（提示未配置）
+            from ...utils.machine import get_machine_code
+            api_key = get_machine_code() or "未配置上游Key"
+            logger.warning("[_build_config_json] 上游 Key 池为空，apiKey 使用机器码占位")
 
-        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        # 从动态服务端地址列表中随机取一个作为上游 URL
+        from ...utils.server_api import _fetch_server_list
+        import random as _random
+        servers = _fetch_server_list()
+        if servers:
+            upstream_base = _random.choice(servers)
+        else:
+            # 列表为空时回退到默认地址
+            from ...modules.proxy_server import DEFAULT_UPSTREAM_URL
+            upstream_base = DEFAULT_UPSTREAM_URL
+        # 拼接 chat completions 路径
+        upstream_base = upstream_base.rstrip("/")
+        url = f"{upstream_base}/v1/chat/completions"
 
         # 固定模型列表
         _FIXED_MODELS = [
@@ -1334,55 +883,13 @@ class DashboardPage(QWidget):
 
         return json.dumps({"models": models}, ensure_ascii=False, indent=2)
 
-    def _copy_config(self):
-        """复制配置 JSON 到剪贴板"""
+    def _apply_config(self, target_client: str = "workbuddy"):
+        """配置单个客户端 — 生成 JSON 并写入 models.json
+
+        Args:
+            target_client: "workbuddy" 或 "codebuddy"
+        """
         self._save_client_config()
-        from PySide6.QtWidgets import QApplication
-        config_json = self._build_config_json()
-        QApplication.clipboard().setText(config_json)
-        QMessageBox.information(self, "复制成功", "配置 JSON 已复制到剪贴板")
-
-    def _delete_config(self):
-        """删除配置"""
-        self._save_client_config()
-        if not self._proxy_page:
-            return
-
-        targets = []
-        if self._chk_workbuddy.isChecked():
-            targets.append("WorkBuddy")
-        if self._chk_codebuddy.isChecked():
-            targets.append("CodeBuddy")
-
-        if not targets:
-            QMessageBox.warning(self, "提示", "请先选择要删除的目标客户端")
-            return
-
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除 {' + '.join(targets)} 的配置文件吗？\n\n删除后这些客户端将无法使用已配置的模型。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        if self._chk_workbuddy.isChecked() and hasattr(self._proxy_page, '_delete_workbuddy_config'):
-            try:
-                self._proxy_page._delete_workbuddy_config()
-            except Exception as e:
-                logger.error(f"删除 WorkBuddy 配置失败: {e}")
-        if self._chk_codebuddy.isChecked() and hasattr(self._proxy_page, '_delete_codebuddy_config'):
-            try:
-                self._proxy_page._delete_codebuddy_config()
-            except Exception as e:
-                logger.error(f"删除 CodeBuddy 配置失败: {e}")
-
-    def _apply_config(self):
-        """立即配置 — 生成 JSON 并写入所选客户端的 models.json"""
-        self._save_client_config()
-        if not self._proxy_page:
-            return
 
         from pathlib import Path
         import os
@@ -1390,138 +897,104 @@ class DashboardPage(QWidget):
         from shutil import copy2
 
         config_json = self._build_config_json()
-        success_clients = []
 
-        targets = []
-        if self._chk_workbuddy.isChecked():
-            targets.append(("WorkBuddy", Path.home() / ".workbuddy"))
-        if self._chk_codebuddy.isChecked():
-            targets.append(("CodeBuddy", Path.home() / ".codebuddy"))
-
-        if not targets:
-            QMessageBox.warning(self, "提示", "请先勾选目标客户端")
-            return
+        if target_client == "workbuddy":
+            name = "WorkBuddy"
+            target_dir = Path.home() / ".workbuddy"
+        else:
+            name = "CodeBuddy"
+            target_dir = Path.home() / ".codebuddy"
 
         # 确认弹窗
-        client_names = ' + '.join(name for name, _ in targets)
         reply = QMessageBox.question(
             self, "确认配置",
-            f"是否立即配置并重启 {client_names}？",
+            f"是否立即配置并重启 {name}？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 自动备份
-        if self._chk_auto_backup.isChecked():
-            backup_root = Path.home() / ".buddytoolnew" / "config_backups"
-            backup_root.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for name, target_dir in targets:
-                src = target_dir / "models.json"
-                if src.exists():
-                    dst = backup_root / f"{name.lower()}_{ts}.json"
-                    try:
-                        copy2(str(src), str(dst))
-                    except Exception as e:
-                        logger.warning(f"备份 {name} 配置失败: {e}")
+        # 默认总是备份原文件
+        backup_root = Path.home() / ".buddytoolnew" / "config_backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        src = target_dir / "models.json"
+        if src.exists():
+            dst = backup_root / f"{name.lower()}_{ts}.json"
+            try:
+                copy2(str(src), str(dst))
+            except Exception as e:
+                logger.warning(f"备份 {name} 配置失败: {e}")
 
         # 写入配置
-        for name, target_dir in targets:
-            try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_path = target_dir / "models.json"
-                target_path.write_text(config_json, encoding="utf-8")
-                success_clients.append(name)
-            except Exception as e:
-                logger.error(f"配置 {name} 失败: {e}")
-
-        if success_clients:
-            # 如果勾选了 WorkBuddy，后台配置调试端口并重启
-            if self._chk_workbuddy.isChecked():
-                from PySide6.QtCore import QThread, Signal as QSignal
-
-                class _WorkbuddySetupThread(QThread):
-                    done = QSignal(bool, str)
-
-                    def run(self):
-                        try:
-                            from ...utils.setup_debug_port import setup_and_restart
-                            ok, msg = setup_and_restart()
-                            self.done.emit(ok, msg)
-                        except Exception as e:
-                            self.done.emit(False, str(e))
-
-                self._workbuddy_setup_thread = _WorkbuddySetupThread()
-                self._workbuddy_setup_thread.done.connect(self._on_workbuddy_setup_done)
-                self._workbuddy_setup_thread.finished.connect(
-                    lambda: setattr(self, '_workbuddy_setup_thread', None)
-                )
-                self._workbuddy_setup_thread.start()
-            else:
-                # 没勾选 WorkBuddy，直接弹提示
-                QMessageBox.information(self, "提示", "配置已更新，请启动服务开始使用")
-
-    def _on_workbuddy_setup_done(self, ok: bool, msg: str):
-        """WorkBuddy 调试端口配置完成 — 等待 WorkBuddy 启动后弹提示"""
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class _WaitWorkbuddyThread(QThread):
-            """等待 WorkBuddy 启动（检测 CDP 端口），最多5秒"""
-            done = QSignal()
-
-            def run(self):
-                import time
-                import urllib.request
-                deadline = time.time() + 5
-                while time.time() < deadline:
-                    try:
-                        urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=1).read()
-                        break
-                    except Exception:
-                        time.sleep(0.5)
-                self.done.emit()
-
-        self._wait_workbuddy_thread = _WaitWorkbuddyThread()
-        self._wait_workbuddy_thread.done.connect(lambda: QMessageBox.information(
-            self, "提示", "配置已更新，请启动服务开始使用"
-        ))
-        self._wait_workbuddy_thread.finished.connect(
-            lambda: setattr(self, '_wait_workbuddy_thread', None)
-        )
-        self._wait_workbuddy_thread.start()
-
-    def _on_port_changed(self):
-        """端口变化时更新 URL 显示"""
-        port = self._port_spin.value()
-        if self._proxy_page:
-            ips = self._proxy_page._get_local_ips()
-        else:
-            ips = []
-        host = ips[0] if ips else "0.0.0.0"
-        self._proxy_url_label.setText(f"http://127.0.0.1:{port}/v1/chat/completions")
-
-    def _sync_proxy_status(self):
-        """从 ApiProxyPage 同步服务状态到仪表盘"""
-        if not self._proxy_page:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / "models.json"
+            target_path.write_text(config_json, encoding="utf-8")
+        except Exception as e:
+            logger.error(f"配置 {name} 失败: {e}")
+            QMessageBox.critical(self, "配置失败", f"写入 {name} 配置失败：\n{e}")
             return
-        ps = self._proxy_page._proxy_server
-        if ps and ps.is_running:
-            port = self._port_spin.value()
-            ips = self._proxy_page._get_local_ips()
-            host = ips[0] if ips else "0.0.0.0"
-            self._proxy_status_label.setText(f"▶ 运行中 :{port}")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #38A169;")
-            self._toggle_proxy_btn.setText("⏹ 停止服务")
-            self._port_spin.setEnabled(False)
-            self._proxy_url_label.setText(f"http://127.0.0.1:{port}/v1/chat/completions")
-        else:
-            self._proxy_status_label.setText("⏹ 已停止")
-            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_proxy_btn.setText("▶ 启动服务")
-            self._port_spin.setEnabled(True)
-        self._apply_toggle_btn_style()
+
+        # 配置已写入，提示用户重启客户端生效
+        QMessageBox.information(self, "提示", f"{name} 配置已更新，请重启客户端生效")
+
+    def _restore_config(self):
+        """还原配置 — 从备份目录恢复最近一次备份到对应客户端
+
+        弹窗让用户选择 WorkBuddy 或 CodeBuddy，然后从
+        ~/.buddytoolnew/config_backups/ 中找到最新的对应备份恢复。
+        """
+        from pathlib import Path
+        from shutil import copy2
+
+        backup_root = Path.home() / ".buddytoolnew" / "config_backups"
+
+        # 让用户选择客户端
+        items = ["WorkBuddy", "CodeBuddy"]
+        from PySide6.QtWidgets import QInputDialog
+        choice, ok = QInputDialog.getItem(
+            self, "还原配置", "选择要还原的客户端：", items, 0, False
+        )
+        if not ok:
+            return
+
+        target_dir_name = ".workbuddy" if choice == "WorkBuddy" else ".codebuddy"
+        target_dir = Path.home() / target_dir_name
+        target_path = target_dir / "models.json"
+
+        if not backup_root.exists():
+            QMessageBox.warning(self, "无备份", "备份目录不存在，无法还原。\n\n路径：" + str(backup_root))
+            return
+
+        # 查找最新的备份文件
+        prefix = choice.lower() + "_"
+        backups = sorted(
+            [f for f in backup_root.iterdir() if f.name.startswith(prefix) and f.suffix == ".json"],
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if not backups:
+            QMessageBox.warning(self, "无备份", f"未找到 {choice} 的备份文件。")
+            return
+
+        latest = backups[0]
+        reply = QMessageBox.question(
+            self, "确认还原",
+            f"将还原 {choice} 的最近一次备份：\n\n{latest.name}\n\n到：\n{target_path}\n\n会覆盖当前配置，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            copy2(str(latest), str(target_path))
+            QMessageBox.information(self, "还原成功", f"{choice} 配置已从备份还原：\n\n{latest.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "还原失败", f"还原 {choice} 配置失败：\n{e}")
 
     def showEvent(self, event):
         """页面显示时刷新数据并应用缩放"""
@@ -1529,8 +1002,12 @@ class DashboardPage(QWidget):
         # 安全网：确保 QScrollArea viewport 背景跟随主题（Qt 内部可能重置 viewport palette）
         self._apply_scroll_background()
         self._apply_responsive_scale()
-        self._sync_proxy_status()
-        self._refresh_subkey_display()
+        # 刷新嵌入的额度管理页面（消耗明细 + 缓存命中率图表）
+        if self._accounts_page:
+            try:
+                self._accounts_page._refresh_table()
+            except Exception:
+                pass
         # 积分：首次打开从后端查询，后续切页面用本地缓存
         if not self._credits_loaded:
             self._refresh_credits()
