@@ -14,7 +14,7 @@ from .ui.pages import (
     DashboardPage, AccountsPage, ApiProxyPage,
 )
 from .ui import get_stylesheet
-from .i18n import t
+
 from .utils.store import init_db, load_setting
 from .modules.updater import UpdateChecker, get_current_version
 
@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
         self._update_version_suffix()
         self.setWindowTitle("⚡ BuddyToolNew")
         self.setMinimumSize(QSize(520, 520))
-        self.resize(600, 600)
+        self.resize(750, 600)
 
         # 初始化数据库
         init_db()
@@ -267,15 +267,10 @@ class MainWindow(QMainWindow):
             logger.debug(f"设置 Dock 图标失败: {e}")
 
     def _on_accounts_quota_updated(self):
-        """账号页积分更新 → 从磁盘重新加载代理池数据并刷新
-
-        账号页面查分使用独立的 ProxyDatabase() 实例写盘，
-        代理页面的 db 实例内存可能还是旧数据，需要 reload_from_disk。
-        """
+        """账号页积分更新 → 刷新代理池子 Key 列表"""
         proxy_page = self._proxy_page
         if proxy_page:
             try:
-                proxy_page._refresh_upstream_keys(reload_from_disk=True)
                 proxy_page._refresh_sub_keys()
             except Exception:
                 pass

@@ -33,6 +33,9 @@ _server_list_expire: float = 0.0
 _server_list_lock = threading.Lock()
 _SERVER_LIST_TTL = 600  # 10 分钟缓存
 
+# 本地开发模式：True 时使用 http://127.0.0.1:5000 作为服务端地址，不从远程获取
+_LOCAL_MODE = False
+
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
 _AES_KEY = bytes.fromhex(_obf_get("AES_KEY_HEX"))
 
@@ -51,13 +54,44 @@ _plain_session = _requests_module.Session()
 _plain_session.trust_env = False  # 忽略系统代理环境变量
 
 
-def _fetch_server_list(force_refresh: bool = False) -> list:
-    """从远程地址列表下载服务端地址，每行一个，返回去重后的列表
+def set_local_mode(enabled: bool):
+    """设置本地开发模式
 
     Args:
-        force_refresh: True 时强制刷新缓存（启动时使用）
+        enabled: True 时使用 http://127.0.0.1:5000 作为服务端地址，忽略远程地址列表
+    """
+    global _LOCAL_MODE
+    _LOCAL_MODE = bool(enabled)
+    if _LOCAL_MODE:
+        # 清空远程缓存，强制走本地地址
+        global _server_list_cache, _server_list_expire
+        _server_list_cache = []
+        _server_list_expire = 0.0
+
+
+def is_local_mode() -> bool:
+    """查询当前是否为本地开发模式"""
+    return _LOCAL_MODE
+
+
+_LOCAL_SERVER = "http://127.0.0.1:5000"
+
+
+def _fetch_server_list(force_refresh: bool = False) -> list:
+    """获取服务端地址列表
+
+    本地模式: 直接返回 ["http://127.0.0.1:5000"]
+    远程模式: 从远程地址列表下载，每行一个，返回去重后的列表
+
+    Args:
+        force_refresh: True 时强制刷新缓存（启动时使用，仅远程模式有效）
     """
     global _server_list_cache, _server_list_expire
+
+    # 本地模式：直接返回本地地址
+    if _LOCAL_MODE:
+        return [_LOCAL_SERVER]
+
     now = time.time()
     # 缓存未过期且非强制刷新，直接返回
     if not force_refresh and _server_list_cache and now < _server_list_expire:
@@ -97,16 +131,6 @@ def _fetch_server_list(force_refresh: bool = False) -> list:
 
         # 完全没有地址，返回空列表
         return []
-
-
-def _get_active_base() -> str:
-    """获取当前可用的服务端 API 基址（随机选取一个）"""
-    global _active_base
-    servers = _fetch_server_list()
-    if servers:
-        _active_base = random.choice(servers)
-        return _active_base
-    return ""
 
 
 def _build_signed_headers() -> dict:
@@ -355,6 +379,73 @@ def get_credits(user_key: str = None) -> dict:
     return {"error": str(last_error) if last_error else "无可用服务端地址"}
 
 
+def get_today_usage(user_key: str = None, page: int = 1, page_size: int = 20) -> tuple:
+    """获取今日使用记录（GET 明文接口，支持分页）
+
+    GET /api/user/today-usage?userKey={userKey}&page={page}&pageSize={pageSize}
+
+    Args:
+        user_key: 机器码，为空时使用本机已保存的机器码
+        page: 页码（从 1 开始）
+        page_size: 每页条数
+
+    Returns:
+        (records, total): records 为当前页记录列表，total 为总记录数
+        失败时返回 ([], 0)
+    """
+    from .machine import get_machine_code
+
+    key = user_key or get_machine_code()
+    if not key:
+        logger.warning("[get_today_usage] 机器码为空，未激活，跳过查询")
+        return [], 0
+
+    logger.info(f"[get_today_usage] GET /api/user/today-usage | userKey={key[:12]}... page={page} pageSize={page_size}")
+
+    servers = list(_fetch_server_list())
+    if servers:
+        random.shuffle(servers)
+    last_error = None
+    for base in servers:
+        url = f"{base}/api/user/today-usage"
+        try:
+            resp = _plain_session.get(url, params={
+                "userKey": key,
+                "page": page,
+                "pageSize": page_size,
+            }, timeout=15)
+            logger.info(f"[get_today_usage] {base} 响应 HTTP {resp.status_code} | body={resp.text[:500]}")
+            try:
+                data = resp.json()
+            except Exception as e:
+                logger.error(f"[get_today_usage] 响应 JSON 解析失败: {e}")
+                last_error = e
+                continue
+
+            records = []
+            total = 0
+            if isinstance(data, dict):
+                records = data.get("records") or data.get("data") or []
+                total = data.get("total", 0) or data.get("totalCount", 0) or len(records)
+            elif isinstance(data, list):
+                records = data
+                total = len(data)
+
+            logger.info(f"[get_today_usage] 获取到 {len(records)} 条记录，总数 {total}")
+            return records, total
+        except _FAILABLE_EXC as e:
+            last_error = e
+            logger.warning(f"[get_today_usage] {base} 请求失败: {e}，尝试下一个地址")
+            continue
+        except Exception as e:
+            logger.error(f"[get_today_usage] {base} 异常: {e}")
+            last_error = e
+            continue
+
+    logger.error(f"[get_today_usage] 所有服务端地址均不可用，最后错误: {last_error}")
+    return [], 0
+
+
 def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
     """卡密兑换（POST 加密接口）
 
@@ -379,7 +470,9 @@ def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
 
 
 def check_version(current_version: str = "", platform: str = "win") -> dict:
-    """检查新版本（POST 加密接口）
+    """检查新版本（GET 明文接口）
+
+    GET /api/version/check?platform={platform}&version={version}
 
     Args:
         current_version: 当前版本号，为空时从 src/VERSION 读取
@@ -387,15 +480,16 @@ def check_version(current_version: str = "", platform: str = "win") -> dict:
 
     Returns:
         {
-            "has_update": bool,
+            "success": bool,
+            "hasUpdate": bool,
             "version": str,
-            "latest_version": str,
+            "latestVersion": str,
             "platform": str,
-            "download_url": str,
+            "downloadUrl": str,
             "changelog": str,
-            "min_version": str,
-            "is_force_update": bool,
-            "created_at": str,
+            "minVersion": str,
+            "isForceUpdate": bool,
+            "createdAt": str,
         }
         失败时返回 {"error": "..."}
     """
@@ -408,11 +502,36 @@ def check_version(current_version: str = "", platform: str = "win") -> dict:
     if platform == "win":
         platform = "win" if _sys.platform == "win32" else ("mac" if _sys.platform == "darwin" else "linux")
 
-    payload = {
-        "platform": platform,
-        "current_version": current_version,
-    }
-    return _post_with_failover("/version/check", payload, timeout=15)
+    servers = list(_fetch_server_list())
+    if servers:
+        random.shuffle(servers)
+    last_error = None
+    for base in servers:
+        url = f"{base}/api/version/check"
+        try:
+            resp = _plain_session.get(
+                url,
+                params={"platform": platform, "version": current_version},
+                timeout=15,
+            )
+            logger.info(f"[check_version] {base} 响应 HTTP {resp.status_code} | body={resp.text[:500]}")
+            try:
+                data = resp.json()
+            except Exception as e:
+                logger.error(f"[check_version] 响应 JSON 解析失败: {e}")
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            if isinstance(data, dict):
+                return data
+            return {"error": "响应格式异常"}
+        except _FAILABLE_EXC as e:
+            last_error = e
+            logger.warning(f"[check_version] {base} 请求失败: {e}，尝试下一个地址")
+            continue
+        except Exception as e:
+            logger.error(f"[check_version] {base} 异常: {e}")
+            return {"error": str(e)}
+
+    return {"error": str(last_error) if last_error else "无可用服务端地址"}
 
 
 def get_models_list() -> dict:
@@ -423,3 +542,52 @@ def get_models_list() -> dict:
         失败时返回 {"error": "..."}
     """
     return _post_with_failover("/models/list", {}, timeout=15)
+
+
+def get_proxy_models() -> list:
+    """获取模型列表（GET 明文接口，OpenAI 兼容）
+
+    GET /api/proxy/models — 返回服务端支持的模型列表。
+
+    Returns:
+        成功: [{"id": ..., "name": ..., "vendor": ..., "maxInputTokens": ...,
+                "maxOutputTokens": ..., "supportsToolCall": ..., ...}, ...]
+        失败: []
+    """
+    servers = list(_fetch_server_list())
+    if servers:
+        random.shuffle(servers)
+    last_error = None
+    for base in servers:
+        url = f"{base}/api/proxy/models"
+        try:
+            resp = _plain_session.get(url, timeout=15)
+            logger.info(f"[get_proxy_models] {base} 响应 HTTP {resp.status_code} | body={resp.text[:500]}")
+            try:
+                data = resp.json()
+            except Exception as e:
+                logger.error(f"[get_proxy_models] 响应 JSON 解析失败: {e}")
+                last_error = e
+                continue
+            # OpenAI 兼容格式: {"object": "list", "data": [...]}
+            if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                logger.info(f"[get_proxy_models] 获取到 {len(data['data'])} 个模型")
+                return data["data"]
+            # 兼容直接返回 list 的情况
+            if isinstance(data, list):
+                logger.info(f"[get_proxy_models] 获取到 {len(data)} 个模型")
+                return data
+            logger.warning(f"[get_proxy_models] 响应格式异常: {data}")
+            last_error = "响应格式异常"
+            continue
+        except _FAILABLE_EXC as e:
+            last_error = e
+            logger.warning(f"[get_proxy_models] {base} 请求失败: {e}，尝试下一个地址")
+            continue
+        except Exception as e:
+            logger.error(f"[get_proxy_models] {base} 异常: {e}")
+            last_error = e
+            continue
+
+    logger.error(f"[get_proxy_models] 所有服务端地址均不可用，最后错误: {last_error}")
+    return []

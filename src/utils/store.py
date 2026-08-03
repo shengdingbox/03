@@ -251,13 +251,3 @@ def load_setting(key: str, default: str = "") -> str:
         return row["value"] if row else default
     finally:
         conn.close()
-
-
-def load_all_settings() -> dict[str, str]:
-    """加载所有设置"""
-    conn = get_connection()
-    try:
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
-        return {r["key"]: r["value"] for r in rows}
-    finally:
-        conn.close()

@@ -1,8 +1,8 @@
 """自动更新模块 - 检测新版本并打开浏览器跳转下载
 
 更新流程:
-1. 启动时 & 每小时检测更新（POST /api/version/check 加密接口）
-2. 服务端返回 has_update=true → 弹窗提示(含changelog) → 用户确认 → 打开浏览器跳转 download_url
+1. 启动时 & 每小时检测更新（GET /api/version/check 明文接口）
+2. 服务端返回 hasUpdate=true → 弹窗提示(含changelog) → 用户确认 → 打开浏览器跳转 downloadUrl
 """
 
 import logging
@@ -93,12 +93,13 @@ def _fetch_version_info() -> dict | None:
         logger.warning(f"服务端版本检查失败: {ver_info.get('error', '无响应') if ver_info else '无响应'}")
         return None
 
-    if not ver_info.get("has_update"):
+    # public-api.md 返回 camelCase 字段
+    if not ver_info.get("hasUpdate"):
         logger.info(f"服务端版本检查: 当前 {current} 已是最新")
         return None
 
-    download_url = str(ver_info.get("download_url", "")).strip()
-    latest_ver = str(ver_info.get("latest_version") or ver_info.get("version", "")).strip()
+    download_url = str(ver_info.get("downloadUrl", "")).strip()
+    latest_ver = str(ver_info.get("latestVersion") or ver_info.get("version", "")).strip()
     changelog = str(ver_info.get("changelog", ""))
 
     if not latest_ver or not download_url:

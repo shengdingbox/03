@@ -262,8 +262,6 @@ MODEL_MAX_OUTPUT_TOKENS = {
     "hy3": 131072,
 }
 
-IMAGE_UNSUPPORTED_TEXT_MODELS = {m for m, v in MODEL_SUPPORTS_IMAGES.items() if not v}
-
 def _model_supports_images(model: str) -> bool:
     return MODEL_SUPPORTS_IMAGES.get(model, True)
 
@@ -1422,175 +1420,29 @@ class ProxyDatabase:
         """立即刷盘（用于程序退出前调用）"""
         self._flush_to_disk()
 
-    # === 上游 Key 管理 ===
+    # === 上游 Key 管理（Key 池已删除，改为单 Key 模式） ===
+    # 保留桩函数避免外部调用报错
 
-    def get_upstream_keys(self) -> list[dict]:
-        with self._lock:
-            return list(self._data.get("upstream_keys", []))
+    def get_upstream_keys(self) -> list:
+        return []
 
     def add_upstream_key(self, key_data: dict):
-        with self._lock:
-            self._data.setdefault("upstream_keys", []).append(key_data)
-            self._key_status_version += 1
-            self._dirty = True
-            self._flush_to_disk()
+        pass
 
     def update_upstream_key(self, key_id: str, updates: dict):
-        with self._lock:
-            keys = self._data.setdefault("upstream_keys", [])
-            for k in keys:
-                if k.get("key_id") == key_id:
-                    k.update(updates)
-                    if "status" in updates:
-                        self._key_status_version += 1
-                    break
-            self._save()
+        pass
 
     def delete_upstream_key(self, key_id: str):
-        with self._lock:
-            self._data["upstream_keys"] = [
-                k for k in self._data.get("upstream_keys", [])
-                if k.get("key_id") != key_id
-            ]
-            self._key_status_version += 1
-            self._dirty = True
-            self._flush_to_disk()
+        pass
 
-    def sync_quota_to_key(self, api_key_or_token: str, remaining_credits: float, total_credits: float,
-                           packages: list = None):
-        """同步积分查询结果到上游 Key（智能禁用/恢复）
+    def sync_quota_to_key(self, *args, **kwargs):
+        pass
 
-        规则：
-        - 积分为 0 → 立即禁用（disabled，不再参与轮询）
-        - 积分 > 100 且之前是 disabled/exhausted → 恢复为 active
-        - 0 < 积分 <= 100：保持当前状态
-        - 同时更新 points 和 points_updated_at 字段
-        - 如果提供了 packages，同时存储积分组信息（用于临期优先排序）
-
-        Args:
-            api_key_or_token: 账号的 API Key (ck_xxx) 或 auth_token（与 upstream key 的 api_key 对应）
-            remaining_credits: 剩余积分
-            total_credits: 总积分
-            packages: 积分组列表（来自 ResourcePackage），格式为 [{cycle_remain, cycle_end, ...}]
-        """
-        with self._lock:
-            keys = self._data.setdefault("upstream_keys", [])
-            matched = False
-            for k in keys:
-                # 匹配 api_key 或 label（label 存的是手机号，api_key 存的是 ck_xxx）
-                k_api_key = k.get("api_key", "")
-                k_label = k.get("label", "")
-                if k_api_key == api_key_or_token or k_label == api_key_or_token:
-                    matched = True
-                    old_status = k.get("status", "active")
-                    # 更新积分
-                    k["points"] = f"{remaining_credits:.0f}/{total_credits:.0f}"
-                    k["points_updated_at"] = datetime.now().isoformat()
-
-                    # 存储积分组信息（用于临期优先排序）
-                    if packages is not None:
-                        # 只保留临期优先排序所需的关键字段，避免存太多冗余
-                        pkg_summaries = []
-                        for pkg in packages:
-                            if isinstance(pkg, dict):
-                                pkg_summaries.append({
-                                    "cycle_remain": pkg.get("cycle_remain", 0),
-                                    "cycle_end": pkg.get("cycle_end", ""),
-                                    "package_name": pkg.get("package_name", ""),
-                                    "package_type": pkg.get("package_type", ""),
-                                })
-                            else:
-                                # ResourcePackage 对象
-                                try:
-                                    pkg_summaries.append({
-                                        "cycle_remain": pkg.cycle_remain,
-                                        "cycle_end": pkg.cycle_end,
-                                        "package_name": pkg.package_name,
-                                        "package_type": pkg.package_type,
-                                    })
-                                except AttributeError:
-                                    pass
-                        k["packages"] = pkg_summaries
-
-                    # 读取该 Key 的自定义阈值
-                    min_threshold = float(k.get("min_credits_threshold", 0) or 0)
-                    auto_enable = float(k.get("auto_enable_threshold", 100) or 100)
-
-                    # 积分低于阈值 → 禁用（但不覆盖 abnormal 和 permanent_disabled 状态）
-                    # ⚠️ 防御：如果 remaining=0 且 total=0，说明查分失败返回了空数据，
-                    # 不能当成"积分用完"处理，否则会把正常 Key 全部误禁用
-                    if remaining_credits <= 0 and total_credits <= 0:
-                        logger.warning(f"[积分同步] Key {k.get('label', k.get('key_id',''))} "
-                                      f"查分返回 remaining=0 total=0，疑似查分失败，跳过禁用（保持 {old_status}）")
-                    elif remaining_credits <= min_threshold and total_credits > 0:
-                        if old_status in ("active", "cooldown", "rate_limited", "exhausted"):
-                            k["status"] = "disabled"
-                            self._key_status_version += 1
-                            logger.info(f"[积分同步] Key {k.get('label', k.get('key_id',''))} 积分{remaining_credits:.0f}<={min_threshold:.0f}，{old_status} -> DISABLED")
-                    # 积分高于自动启用阈值 → 恢复 active（但不恢复 abnormal 和 permanent_disabled）
-                    elif remaining_credits > auto_enable:
-                        if old_status in ("disabled", "exhausted", "cooldown", "rate_limited"):
-                            k["status"] = "active"
-                            self._key_status_version += 1
-                            logger.info(f"[积分同步] Key {k.get('label', k.get('key_id',''))} 积分{remaining_credits:.0f}>{auto_enable:.0f}，{old_status} -> ACTIVE")
-                    # 0 < 积分 <= 100：保持当前状态
-                    break
-            if not matched:
-                logger.warning(f"[积分同步] 未找到匹配的上游 Key: api_key_or_token={api_key_or_token[:30]}...")
-            # 立即写盘（不用延迟写入，否则 quota_updated 信号触发 reload 时读到旧数据）
-            self._dirty = True
-            self._flush_to_disk()
-
-    def deduct_key_points(self, key_id: str, credit_used: float):
-        """实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
-
-        从 points 字段 "剩余/总量" 中减去本次消耗的 credit。
-        如果 points 为空或格式不对，跳过（等查分修正）。
-        """
-        with self._lock:
-            for k in self._data.get("upstream_keys", []):
-                if k.get("key_id") != key_id:
-                    continue
-                points_str = k.get("points", "")
-                if not points_str or "/" not in points_str:
-                    break
-                try:
-                    remain_str, total_str = points_str.split("/")
-                    remain = float(remain_str)
-                    total = float(total_str)
-                    new_remain = max(0, remain - credit_used)
-                    k["points"] = f"{new_remain:.0f}/{total:.0f}"
-                    # 延迟写入（不需要立即写盘，5分钟查分时会立即写）
-                    self._save()
-                except (ValueError, IndexError):
-                    pass
-                break
+    def deduct_key_points(self, *args, **kwargs):
+        pass
 
     def get_total_points_for_sub_key(self, allowed_key_ids: list = None) -> float:
-        """计算子 Key 可调用的所有上游 Key 的剩余积分总和
-
-        Args:
-            allowed_key_ids: 子 Key 允许使用的上游 Key ID 列表，空=全部
-
-        Returns:
-            剩余积分总和
-        """
-        with self._lock:
-            keys = self._data.get("upstream_keys", [])
-            total = 0.0
-            for k in keys:
-                # 如果指定了 allowed_key_ids，只统计这些 key
-                if allowed_key_ids and k.get("key_id") not in allowed_key_ids:
-                    continue
-                # 解析 points 字段（格式 "剩余/总量"）
-                points_str = k.get("points", "")
-                if points_str and "/" in points_str:
-                    try:
-                        remain = float(points_str.split("/")[0])
-                        total += remain
-                    except (ValueError, IndexError):
-                        pass
-            return total
+        return 0.0
 
     # === 子 Key 管理 ===
 
@@ -1615,75 +1467,9 @@ class ProxyDatabase:
                     break
             self._save()
 
-    def increment_upstream_key_stats(self, key_id: str, prompt_tokens: int = 0,
-                                      completion_tokens: int = 0, total_tokens: int = 0,
-                                      cached_tokens: int = 0, credits: float = 0.0):
-        """原子递增上游 Key 统计计数器（在 DB 锁内读+写，避免并发丢数据）
-
-        旧方式：从缓存读 used_count=5 → +1 → 写 6（并发请求都读到 5，全写 6，丢了）
-        新方式：在锁内读当前值 → 递增 → 写回，保证原子性。
-        积分不再实时扣减，改为请求完成后定时查分（见 _refresh_key_points）。
-        """
-        with self._lock:
-            keys = self._data.setdefault("upstream_keys", [])
-            for k in keys:
-                if k.get("key_id") == key_id:
-                    k["used_count"] = k.get("used_count", 0) + 1
-                    k["last_used_at"] = datetime.now().isoformat()
-                    if prompt_tokens:
-                        k["total_prompt_tokens"] = k.get("total_prompt_tokens", 0) + prompt_tokens
-                    if completion_tokens:
-                        k["total_completion_tokens"] = k.get("total_completion_tokens", 0) + completion_tokens
-                    if total_tokens:
-                        k["total_tokens"] = k.get("total_tokens", 0) + total_tokens
-                    if cached_tokens:
-                        k["total_cached_tokens"] = k.get("total_cached_tokens", 0) + cached_tokens
-                    if credits:
-                        k["total_credits"] = round(k.get("total_credits", 0.0) + credits, 4)
-                    # 临期积分递减：从最快过期的积分组扣除已消耗的积分
-                    if credits and credits > 0:
-                        pkgs = k.get("packages", [])
-                        if pkgs:
-                            remaining_to_deduct = credits
-                            def _pkg_end_ts(p):
-                                ce = str(p.get("cycle_end", ""))
-                                try:
-                                    from datetime import datetime as _dt
-                                    if "T" in ce:
-                                        return _dt.fromisoformat(ce.replace("Z", "+00:00")).timestamp()
-                                    return _dt.strptime(ce, "%Y-%m-%d %H:%M:%S").timestamp()
-                                except:
-                                    return float('inf')
-                            pkgs_sorted = sorted([p for p in pkgs if isinstance(p, dict) and float(p.get("cycle_remain", 0)) > 0],
-                                                  key=_pkg_end_ts)
-                            for p in pkgs_sorted:
-                                if remaining_to_deduct <= 0:
-                                    break
-                                cur_remain = float(p.get("cycle_remain", 0))
-                                if cur_remain <= 0:
-                                    continue
-                                deduct = min(cur_remain, remaining_to_deduct)
-                                p["cycle_remain"] = round(cur_remain - deduct, 4)
-                                remaining_to_deduct -= deduct
-                                logger.debug(f"[临期递减] Key {k.get('label','')} 积分组 {p.get('package_name','')[:20]} 扣除 {deduct:.4f}, 剩余 {p['cycle_remain']:.4f}")
-                            # 同步更新 points 字段（UI 显示用）
-                            total_remain = sum(float(p.get("cycle_remain", 0)) for p in pkgs if isinstance(p, dict))
-                            total_size = sum(float(p.get("cycle_size", 0)) for p in pkgs if isinstance(p, dict))
-                            if total_size > 0:
-                                k["points"] = f"{total_remain:.0f}/{total_size:.0f}"
-                                k["points_updated_at"] = datetime.now().isoformat()
-                            # 实时检查最低积分阈值，低于阈值自动禁用
-                            min_threshold = float(k.get("min_credits_threshold", 0) or 0)
-                            if min_threshold > 0 and total_remain <= min_threshold:
-                                old_status = k.get("status", "active")
-                                if old_status in ("active", "cooldown", "rate_limited", "exhausted"):
-                                    k["status"] = "disabled"
-                                    self._key_status_version += 1
-                                    logger.info(f"[实时阈值] Key {k.get('label', k.get('key_id',''))} 积分{total_remain:.0f}<={min_threshold:.0f}，{old_status} -> DISABLED")
-                    break
-            # 更新每日统计
-            self._update_daily_stats("upstream", key_id, prompt_tokens, completion_tokens, total_tokens, cached_tokens, credits)
-            self._save()
+    def increment_upstream_key_stats(self, *args, **kwargs):
+        """Key 池已删除，桩函数"""
+        pass
 
     def _update_daily_stats(self, category: str, key_id: str, prompt_tokens: int = 0,
                             completion_tokens: int = 0, total_tokens: int = 0,
@@ -1956,514 +1742,69 @@ class ProxyRouter:
                 logger.info(f"创建上游连接池: {domain}")
             return self._sessions[domain]
 
-    def select_key(self, model: str, allowed_key_ids: list = None, exclude: set = None,
+    def select_key(self, model: str = None, allowed_key_ids: list = None, exclude: set = None,
                    key_mode: int = 1, request_data: dict = None) -> Optional[dict]:
-        """选择一个可用的上游 Key（带缓存）
-
-        Args:
-            model: 模型名（用于模型级冷却过滤）
-            allowed_key_ids: 子Key限定的上游Key ID列表
-            exclude: 本次请求已尝试过的 key_id 集合，用于重试时跳过
-            key_mode: 调用模式
-                1 = 专一模式（默认）：真正粘住一个 Key，用到不可用才换下一个
-                2 = 临期优先：优先调用积分组中最快过期的那组所在的 Key
-                3 = 轮询模式：round-robin 轮换，每次请求换一个 Key
-                4 = 会话亲和：同一会话绑定同一 Key，TTL 1 小时（优化项 #5/#7）
-            request_data: 请求体 dict（key_mode=4 时用于计算 session_id）
-
-        缓存 10 秒，减少 DB 锁竞争。
-        """
-        now = time.time()
-        # 加锁保护缓存读写，防止并发请求同时触发缓存刷新导致读到不完整数据
-        with self._cache_lock:
-            db_version = self._db._key_status_version
-            cache_expired = (now - self._upstream_keys_cache_time) > self._UPSTREAM_KEYS_CACHE_TTL
-            version_changed = db_version != self._last_key_status_version
-            if not self._cached_upstream_keys or cache_expired or version_changed:
-                self._cached_upstream_keys = self._db.get_upstream_keys()
-                self._upstream_keys_cache_time = now
-                self._last_key_status_version = db_version
-
-        keys = self._cached_upstream_keys
-
-        # 筛选可用 Key
-        available = []
-        for k in keys:
-            status = k.get("status")
-            if status not in ("active",):
-                # 跳过 exhausted / disabled / cooldown 状态的 Key
-                continue
-            if allowed_key_ids and k.get("key_id") not in allowed_key_ids:
-                continue
-            if exclude and k.get("key_id") in exclude:
-                continue
-            # 模型级冷却过滤（优化项 #8）：检查该 Key 对目标模型是否在冷却中
-            kid = k.get("key_id", "")
-            if model and not self._is_key_schedulable_for_model(kid, model):
-                continue
-            available.append(k)
-
-        if not available:
+        """选择上游 Key — 单 Key 模式，直接返回 buddyKey"""
+        from ..utils.machine import get_machine_code
+        api_key = get_machine_code()
+        if not api_key:
             return None
+        return {"key_id": "buddy", "api_key": api_key, "label": "buddyKey", "status": "active"}
 
-        # 计算池标识（用于区分不同子Key绑定的上游Key池）
-        pool_hash = "global"
-        if allowed_key_ids:
-            pool_hash = str(hash(tuple(sorted(allowed_key_ids))))
-
-        # 负载感知辅助函数（优化项 #6）：并发计数低的优先
-        def _concurrent_count(k: dict) -> int:
-            return self._concurrent_counts.get(k.get("key_id", ""), 0)
-
-        if key_mode == 4:
-            # 会话亲和模式（优化项 #5/#7）：同一会话绑定同一上游 Key，TTL 1 小时
-            session_id = self._get_session_id(request_data) if request_data else ""
-            if session_id:
-                # 检查已有的会话绑定
-                binding = self._sticky_sessions.get(session_id)
-                if binding:
-                    bound_key_id, expire_ts = binding
-                    if now > expire_ts:
-                        # 绑定已过期，清理
-                        self._sticky_sessions.pop(session_id, None)
-                    else:
-                        # 绑定有效，检查绑定的 Key 是否仍可调度
-                        for k in available:
-                            if k.get("key_id") == bound_key_id:
-                                return k
-                        # Key 不可调度，清理绑定并重新选择
-                        self._sticky_sessions.pop(session_id, None)
-                        logger.info(f"[会话亲和] session {session_id[:8]} 绑定的 Key 不可用，重新绑定")
-            # 无绑定或绑定失效，选择并发最低的 Key 并绑定
-            available.sort(key=_concurrent_count)
-            chosen = available[0]
-            if session_id:
-                self._sticky_sessions[session_id] = (chosen.get("key_id", ""), now + 3600)
-                logger.info(f"[会话亲和] session {session_id[:8]} 绑定 Key → {chosen.get('label', chosen.get('key_id', '')[:8])}")
-            return chosen
-
-        elif key_mode == 2:
-            # 临期优先：找到所有 Key 中最快过期且有剩余积分的那组，优先用那个 Key
-            # 排序依据：每个 Key 的 packages 中最快到期的 cycle_end 时间
-            # 例如：KeyA 有 150分(明天过期) + 5000分(下月过期)，KeyB 有 3000分(后天过期)
-            #   → KeyA 排前面（150分明天过期最紧急）
-            # 负载感知：并发计数作为次级排序键（优化项 #6）
-            def _earliest_expiring_time(k: dict) -> float:
-                """返回该 Key 最快过期且有剩余积分的积分组的过期时间戳
-                越小越优先（越快过期），没有过期信息的排最后
-                """
-                packages = k.get("packages", [])
-                earliest = None
-                for pkg in packages:
-                    cycle_remain = 0
-                    cycle_end = ""
-                    if isinstance(pkg, dict):
-                        cycle_remain = float(pkg.get("cycle_remain", 0))
-                        cycle_end = str(pkg.get("cycle_end", ""))
-                    if cycle_remain <= 0:
-                        continue  # 跳过已耗尽的组
-                    if not cycle_end:
-                        continue  # 没有过期时间，跳过
-                    # 解析过期时间
-                    try:
-                        from datetime import datetime as _dt
-                        if "T" in cycle_end:
-                            # ISO 8601 格式: 2026-06-30T23:59:59Z
-                            dt = _dt.fromisoformat(cycle_end.replace("Z", "+00:00"))
-                            ts = dt.timestamp()
-                        else:
-                            try:
-                                ts = float(cycle_end)
-                            except ValueError:
-                                # 空格分隔格式: 2026-06-30 23:59:59
-                                dt = _dt.strptime(cycle_end, "%Y-%m-%d %H:%M:%S")
-                                ts = dt.timestamp()
-                        if earliest is None or ts < earliest:
-                            earliest = ts
-                    except (ValueError, TypeError):
-                        continue
-                # 有过期信息的返回最早时间，没有的排到最后
-                return earliest if earliest is not None else float('inf')
-
-            earliest_time = min(_earliest_expiring_time(k) for k in available)
-            earliest_group = [k for k in available if _earliest_expiring_time(k) == earliest_time]
-            binding_key = f"{pool_hash}:{earliest_time}"
-            dedicated_id = self._expiring_dedicated_keys.get(binding_key)
-            if dedicated_id:
-                for k in earliest_group:
-                    if k.get("key_id") == dedicated_id:
-                        return k
-
-            earliest_group.sort(key=_concurrent_count)
-            chosen = earliest_group[0]
-            self._expiring_dedicated_keys[binding_key] = chosen.get("key_id", "")
-            logger.info(
-                f"[临期优先] 池 {pool_hash[:8]} 最早过期组 {earliest_time} 绑定 Key -> "
-                f"{chosen.get('label', chosen.get('key_id', '')[:8])}"
-            )
-            return chosen
-
-        elif key_mode == 3:
-            # 轮询模式：round-robin，每次请求轮换到下一个 Key
-            # 负载感知：先按并发计数排序，再轮询（优化项 #6）
-            available.sort(key=_concurrent_count)
-            idx = self._round_robin_index.get(pool_hash, 0)
-            idx = idx % len(available)
-            self._round_robin_index[pool_hash] = idx + 1
-            return available[idx]
-
-        else:
-            # 专一模式：真正粘住一个 Key，用到它不可用才换下一个
-            dedicated_id = self._dedicated_keys.get(pool_hash)
-            if dedicated_id:
-                # 上次用的 Key 还在 available 里，继续用它
-                for k in available:
-                    if k.get("key_id") == dedicated_id:
-                        return k
-            # 上次的 Key 不可用了（或第一次），选并发最低的并记住（负载感知 #6）
-            available.sort(key=_concurrent_count)
-            chosen = available[0]
-            self._dedicated_keys[pool_hash] = chosen.get("key_id", "")
-            logger.info(f"[专一] 池 {pool_hash[:8]} 切换专一 Key → {chosen.get('label', chosen.get('key_id', '')[:8])}")
-            return chosen
-
-    # ─── 优化项 #5/#7：粘性会话 session_id 提取 ───
-    def _get_session_id(self, request_data: dict) -> str:
-        """从请求体中提取会话标识（system message + 第一条 user message 的 SHA-256 hash 前 16 位）
-
-        不依赖 X-Session-ID 头，用消息内容 hash 作为会话标识，相对稳定。
-        """
-        if not request_data:
-            return ""
-        messages = request_data.get("messages", [])
-        system_content = ""
-        first_user_content = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            # content 可能是字符串或列表（多模态）
-            if isinstance(content, list):
-                content = " ".join(
-                    str(c.get("text", "")) if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            else:
-                content = str(content)
-            if role == "system" and not system_content:
-                system_content = content
-            elif role == "user" and not first_user_content:
-                first_user_content = content
-                break
-        combined = system_content + first_user_content
-        if not combined:
-            return ""
-        return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
-
-    # ─── 优化项 #3：等待队列 ───
-    def select_key_with_wait(self, model: str, allowed_key_ids: list = None,
-                             exclude: set = None, key_mode: int = 1,
-                             request_data: dict = None) -> Optional[dict]:
-        """选择上游 Key，无可用时等待 5 秒重试一次（优化项 #3）
-
-        select_key 返回 None 时，等待 5 秒后重试一次，仍无可用才返回 None。
-        仅当有冷却中的 Key 时才等待（否则没有等待的意义）。
-        """
-        key = self.select_key(model, allowed_key_ids, exclude, key_mode, request_data)
-        if key is not None:
-            return key
-
-        # 检查是否有冷却中的 Key（等待可能让它恢复）
-        has_cooldown = False
-        for k in self._cached_upstream_keys:
-            if k.get("status") == "cooldown":
-                if allowed_key_ids and k.get("key_id") not in allowed_key_ids:
-                    continue
-                if exclude and k.get("key_id") in exclude:
-                    continue
-                has_cooldown = True
-                break
-
-        if not has_cooldown:
-            return None  # 没有冷却中的 Key，等待无意义
-
-        logger.info("[等待队列] 无可用 Key 但有冷却中的 Key，等待 5 秒后重试...")
-        threading.Event().wait(5)
+    def select_key_with_wait(self, model: str = None, allowed_key_ids: list = None,
+                              exclude: set = None, key_mode: int = 1,
+                              request_data: dict = None) -> Optional[dict]:
+        """单 Key 模式 — 直接调用 select_key，无需等待"""
         return self.select_key(model, allowed_key_ids, exclude, key_mode, request_data)
 
-    # ─── 优化项 #8/#10：模型级冷却 + 渐进退避 ───
-    def _is_key_schedulable_for_model(self, key_id: str, model: str) -> bool:
-        """检查 Key 对特定模型是否可调度（不在模型级冷却中）"""
-        with self._lock:
-            cooldowns = self._model_cooldowns.get(key_id, {})
-            expire_ts = cooldowns.get(model)
-        if expire_ts and time.time() < expire_ts:
-            return False
-        # 清理过期条目
-        if expire_ts:
-            with self._lock:
-                cooldowns = self._model_cooldowns.get(key_id, {})
-                if model in cooldowns:
-                    del cooldowns[model]
+    # 以下方法已删除（Key 池状态管理不再需要），保留桩函数避免外部调用报错
+
+    def _is_key_schedulable_for_model(self, *args, **kwargs):
         return True
 
-    def mark_model_cooldown(self, key_id: str, model: str) -> int:
-        """标记模型级冷却，使用渐进退避（优化项 #8/#10）
+    def mark_model_cooldown(self, *args, **kwargs):
+        pass
 
-        冷却时间 = min(10 * 2^(count-1), 80)，即 10→20→40→80 封顶。
-        请求成功后调用 reset_cooldown_count() 归零。
+    def reset_cooldown_count(self, *args, **kwargs):
+        pass
 
-        Returns:
-            冷却秒数
-        """
-        with self._lock:
-            count = self._cooldown_counts.get(key_id, 0) + 1
-            self._cooldown_counts[key_id] = count
-            cooldown_secs = min(10 * (2 ** (count - 1)), 80)
-            expire_ts = time.time() + cooldown_secs
-            if key_id not in self._model_cooldowns:
-                self._model_cooldowns[key_id] = {}
-            self._model_cooldowns[key_id][model] = expire_ts
-        label = key_id[:8]
-        logger.info(f"[模型冷却] Key {label} 模型 {model} 冷却 {cooldown_secs}s（第{count}次退避）")
-        return cooldown_secs
+    def _classify_error(self, *args, **kwargs):
+        return "unknown"
 
-    def reset_cooldown_count(self, key_id: str):
-        """请求成功后归零渐进退避计数器（优化项 #10）"""
-        with self._lock:
-            if key_id in self._cooldown_counts:
-                self._cooldown_counts[key_id] = 0
-
-    # ─── 优化项 #7/#9：故障转移分类 ───
-    def _classify_error(self, status_code: int, resp_body: str = "") -> str:
-        """分类上游错误，决定故障转移策略
-
-        Returns:
-            "RETRY_SAME"  - 同 Key 重试 1 次再换（502/503/超时/连接错误）
-            "SWITCH_KEY"  - 直接换 Key（401/403/429）
-            "FATAL"       - 不重试，直接返回客户端（400 上下文超长 / 401 网关拦截）
-        """
-        if status_code == 0:
-            # 异常（超时/连接错误）→ 同 Key 重试
-            return "RETRY_SAME"
-        if status_code == 400:
-            if not resp_body.strip() or "input length too long" in resp_body or '"code":11115' in resp_body:
-                return "FATAL"
-            return "SWITCH_KEY"
-        elif status_code == 401:
-            # 401 返回 HTML = 网关层拦截，不重试
-            if "<html>" in resp_body.lower() or "<!doctype" in resp_body.lower():
-                return "FATAL"
-            return "SWITCH_KEY"
-        elif status_code in (502, 503):
-            return "RETRY_SAME"
-        elif status_code in (403, 429):
-            return "SWITCH_KEY"
-        else:
-            return "SWITCH_KEY"
-
-    # ─── 优化项 #17：健康检测 ───
     def start_health_check(self):
-        """启动后台健康检测线程"""
-        self._health_check_stop.clear()
-        self._health_check_thread = threading.Thread(target=self._health_check_loop, daemon=True)
-        self._health_check_thread.start()
+        pass
 
     def stop_health_check(self):
-        """停止后台健康检测线程"""
-        self._health_check_stop.set()
+        pass
 
     def _health_check_loop(self):
-        """后台健康检测循环：每 5 分钟 + 随机抖动检测所有 cooldown Key
-
-        用轻量 chat 请求探测 cooldown 状态的 Key 能否恢复为 active。
-        """
-        logger.info("[健康检测] 后台检测线程启动")
-        while not self._health_check_stop.is_set():
-            # 睡眠 5 分钟 + 随机抖动 0-60 秒
-            sleep_secs = 300 + random.uniform(0, 60)
-            if self._health_check_stop.wait(sleep_secs):
-                break  # 收到停止信号
-
-            try:
-                keys = self._db.get_upstream_keys()
-                upstream_url = self.get_upstream_url()
-                models_url = f"{upstream_url}{UPSTREAM_MODELS_PATH}"
-
-                for key in keys:
-                    if self._health_check_stop.is_set():
-                        break
-                    key_id = key.get("key_id", "")
-                    status = key.get("status", "active")
-                    # 只检测 active 和 cooldown 状态的 Key
-                    if status not in ("active", "cooldown"):
-                        continue
-                    api_key = key.get("api_key", "")
-                    if not api_key:
-                        continue
-
-                    # 只检测 cooldown 状态的 Key 能否恢复，不主动把 active 标记成 cooldown
-                    # （上游 /v1/models 可能返回 404，不能作为健康判据，避免误伤 active Key）
-                    if status != "cooldown":
-                        continue
-
-                    self._last_health_check[key_id] = time.time()
-                    label = key.get("label", key_id[:8])
-
-                    try:
-                        # 用最轻量的 chat 请求检测（上游 /v1/models 返回 404，不可用）
-                        test_data = {
-                            "model": "auto",
-                            "stream": True,
-                            "max_tokens": 1,
-                            "messages": [
-                                {"role": "system", "content": "You are helpful."},
-                                {"role": "user", "content": "hi"},
-                            ],
-                        }
-                        resp = requests.post(
-                            f"{upstream_url}{UPSTREAM_CHAT_PATH}",
-                            json=test_data,
-                            headers=_build_workbuddy_relay_headers(api_key),
-                            timeout=15,
-                            proxies={"http": None, "https": None},
-                        )
-                        if resp.status_code in (200, 400):
-                            # 200=正常 400=参数问题但Key有效 → 恢复为 active
-                            self._db.update_upstream_key(key_id, {"status": "active"})
-                            self._upstream_keys_cache_time = 0
-                            logger.info(f"[健康检测] Key {label} cooldown → active (status={resp.status_code})")
-                        elif resp.status_code in (401, 403):
-                            # 认证/风控问题，保持 cooldown（不恶化到 disabled）
-                            logger.warning(f"[健康检测] Key {label} 仍不可用 (status={resp.status_code})，保持 cooldown")
-                        else:
-                            logger.debug(f"[健康检测] Key {label} status={resp.status_code}，保持 cooldown")
-                    except Exception as e:
-                        logger.debug(f"[健康检测] Key {label} 检测异常: {e}，保持 cooldown")
-            except Exception as e:
-                logger.error(f"[健康检测] 检测循环异常: {e}")
-
-        logger.info("[健康检测] 后台检测线程退出")
-
-    def increment_concurrent(self, key_id: str):
-        with self._lock:
-            self._concurrent_counts[key_id] = self._concurrent_counts.get(key_id, 0) + 1
-
-    def decrement_concurrent(self, key_id: str):
-        with self._lock:
-            if key_id in self._concurrent_counts:
-                self._concurrent_counts[key_id] = max(0, self._concurrent_counts[key_id] - 1)
-
-    def get_concurrent_keys(self) -> dict:
-        """返回当前有并发请求的 key_id -> 并发数 字典（用于 UI 标记正在使用的 Key）"""
-        with self._lock:
-            return {k: v for k, v in self._concurrent_counts.items() if v > 0}
+        pass
 
     def mark_key_exhausted(self, key_id: str):
-        """标记 Key 为已耗尽（积分真正用完，不自动恢复）"""
-        self._db.update_upstream_key(key_id, {"status": "exhausted"})
-        # 立即刷新所有缓存，让 select_key 立刻跳过此 Key
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0  # 刷子Key缓存（allowed_key_ids 可能受影响）
-        logger.warning(f"Key {key_id} 标记为 exhausted（积分耗尽，不自动恢复）")
+        pass
 
     def mark_key_abnormal(self, key_id: str):
-        """标记 Key 为异常（被上游风控，403 code:11140，不自动恢复）
-
-        与 exhausted（积分耗尽）不同，abnormal 是账号被风控，
-        积分可能还有，但 chat 接口被封。需要用户手动处理或换号。
-        """
-        self._db.update_upstream_key(key_id, {"status": "abnormal"})
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0
-        logger.warning(f"Key {key_id} 标记为 abnormal（被上游风控，不自动恢复）")
+        pass
 
     def mark_key_permanent_disabled(self, key_id: str):
-        """标记 Key 为永久禁用（手动操作，不会被查分等自动恢复）
-
-        与 disabled（积分为0自动禁用，查分>100自动恢复）不同，
-        permanent_disabled 只能通过 mark_key_active() 手动恢复。
-        """
-        self._db.update_upstream_key(key_id, {"status": "permanent_disabled"})
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0
-        logger.warning(f"Key {key_id} 标记为 permanent_disabled（永久禁用，需手动恢复）")
+        pass
 
     def mark_key_active(self, key_id: str):
-        """手动恢复 Key 为 active（用于恢复 permanent_disabled / abnormal 状态）"""
-        self._db.update_upstream_key(key_id, {"status": "active"})
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0
-        logger.info(f"Key {key_id} 手动恢复为 active")
+        pass
 
     def mark_key_cooldown(self, key_id: str):
-        """标记 Key 为临时冷却（429 临时限流，10秒后自动恢复）
-
-        注意：仅用于临时限流（请求过快）。如果是额度耗尽(code 14018)，
-        应调用 mark_key_exhausted()，不能自动恢复。
-        """
-        self._db.update_upstream_key(key_id, {"status": "cooldown"})
-        # 立即刷新所有缓存，让 select_key 立刻跳过此 Key
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0
-        # 启动后台线程 10 秒后自动恢复
-        import threading
-        def _recover():
-            time.sleep(10)
-            # 检查是否还是 cooldown（避免覆盖其他状态变更）
-            keys = self._db.get_upstream_keys()
-            for k in keys:
-                if k.get("key_id") == key_id and k.get("status") == "cooldown":
-                    self._db.update_upstream_key(key_id, {"status": "active"})
-                    logger.info(f"Key {key_id} 冷却完成，自动恢复为 active")
-                    # 刷新缓存
-                    self._upstream_keys_cache_time = 0
-                    break
-        t = threading.Thread(target=_recover, daemon=True)
-        t.start()
-        logger.warning(f"Key {key_id} 被限流(429)，进入 10 秒冷却")
+        pass
 
     def mark_key_rate_limited(self, key_id: str):
-        """标记 Key 为系统限流（401/429 系统级限流，不自动恢复）
-
-        与 cooldown（429 临时限流，10秒自动恢复）不同，
-        rate_limited 需手动恢复或下次查分不限流才恢复。
-        """
-        self._db.update_upstream_key(key_id, {"status": "rate_limited"})
-        self._upstream_keys_cache_time = 0
-        self._sub_keys_cache_time = 0
-        logger.warning(f"Key {key_id} 标记为 rate_limited（系统限流，需手动或查分恢复）")
-
-    def get_upstream_url(self, model: str = "") -> str:
-        """获取上游 API base URL（带缓存）
-
-        缓存 30 秒，避免每次请求都拿 DB 锁读 settings。
-        用户修改 upstream_proxy 设置后最多 30 秒生效。
-        """
-        now = time.time()
-        if self._cached_upstream_url and (now - self._upstream_url_cache_time) < self._UPSTREAM_URL_CACHE_TTL:
-            return self._cached_upstream_url
-
-        settings = self._db.get_settings()
-        custom_proxy = settings.get("upstream_proxy", "")
-        if custom_proxy:
-            url = custom_proxy
-        else:
-            url = _get_default_upstream_proxy()
-
-        self._cached_upstream_url = url
-        self._upstream_url_cache_time = now
-        return url
+        pass
 
     def invalidate_upstream_cache(self):
-        """强制刷新 upstream URL 缓存（用户修改设置后调用）"""
+        """清空缓存"""
         self._cached_upstream_url = ""
         self._upstream_url_cache_time = 0
-        self._cached_upstream_keys = []
-        self._upstream_keys_cache_time = 0
         self._cached_sub_keys = {}
         self._sub_keys_cache_time = 0
         self._last_sub_key_version = -1
-        self._expiring_dedicated_keys.clear()
 
     def authenticate_sub_key(self, token: str) -> Optional[dict]:
         """验证子 API Key（带缓存，避免每次请求遍历+加锁）

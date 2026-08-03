@@ -39,17 +39,9 @@ logger = logging.getLogger(__name__)
 from ..utils._obfuscate import get as _obf_get
 BILLING_API_BASE = _obf_get("BILLING_API_BASE")
 
-# 公开 API 在 codebuddy.cn
-PUBLIC_API_BASE = _obf_get("PUBLIC_API_BASE")
-
 # === API 路径 ===
 BILLING_API_PATHS = {
     "user_resource": "/v2/billing/meter/get-user-resource",
-}
-
-PUBLIC_API_PATHS = {
-    "config": "/v3/config",
-    "activity_banner": "/v2/activity/banner",
 }
 
 # Keycloak token refresh 端点

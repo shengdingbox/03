@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPalette
 
-from ...i18n import t
+
 from ...utils.store import load_accounts, load_setting, save_setting
 from ...models import AccountStatus
 from ...modules.proxy_server import ProxyDatabase
@@ -253,7 +253,7 @@ class DashboardPage(QWidget):
     底部：嵌入 AccountsPage 的消耗明细 + 缓存命中率图表
     """
 
-    _REF_WIDTH = 536    # 参考宽度（100%缩放时的可用内容宽度，约 600-64 边距）
+    _REF_WIDTH = 686    # 参考宽度（100%缩放时的可用内容宽度，约 750-64 边距）
     _REF_HEIGHT = 560   # 参考高度（100%缩放时的可用内容高度）
     _MIN_SCALE = 0.5    # 最小缩放比例
 
@@ -266,6 +266,7 @@ class DashboardPage(QWidget):
         self._proxy_page = None  # ApiProxyPage 引用，由 MainWindow 注入
         self._credits_loaded = False  # 是否已从后端加载过积分
         self._accounts_page = None  # 嵌入的 AccountsPage 引用，由 MainWindow 注入
+
         self._setup_ui()
         self._load_cached_credits()  # 启动时从本地缓存加载积分
 
@@ -275,7 +276,7 @@ class DashboardPage(QWidget):
         layout.setSpacing(0)
 
         # 标题
-        title = QLabel(t("nav.dashboard"))
+        title = QLabel("仪表盘")
         title.setObjectName("page_title")
         layout.addWidget(title)
 
@@ -359,7 +360,7 @@ class DashboardPage(QWidget):
         btn_row.setSpacing(10)
 
         # 激活卡密按钮
-        self._btn_activate = QPushButton(f"🔑 {t('accounts.add_account')}")
+        self._btn_activate = QPushButton(f"🔑 激活卡密")
         self._btn_activate.setObjectName("primary_btn")
         self._btn_activate.setCursor(Qt.PointingHandCursor)
         self._btn_activate.setMinimumHeight(36)
@@ -810,37 +811,22 @@ class DashboardPage(QWidget):
             pass
 
     def _build_config_json(self) -> str:
-        """根据当前端口、子 API Key 和服务端模型列表生成配置 JSON
+        """根据当前上游地址和机器码生成配置 JSON
 
-        取消本地代理：直接使用上游 API 地址 + 上游 Key 池中第一个可用 Key 作为 apiKey，
+        模型列表从服务端 /api/proxy/models 接口动态获取（明文 GET，OpenAI 兼容格式）。
         客户端（WorkBuddy / CodeBuddy）直接请求上游，不再经过本工具的代理服务。
         """
         import json
-        import secrets as _sec
-        from datetime import datetime
-        from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS, ProxyDatabase
+        import random as _random
 
-        # 从上游 Key 池中获取第一个可用 Key 作为 apiKey
-        api_key = ""
-        try:
-            db = ProxyDatabase.get_instance()
-            upstream_keys = db.get_upstream_keys()
-            for k in upstream_keys:
-                if k.get("status", "active") == "active" and k.get("api_key"):
-                    api_key = k["api_key"]
-                    break
-        except Exception:
-            pass
-
+        # 直接使用 buddyKey（机器码）作为 apiKey
+        from ...utils.machine import get_machine_code
+        api_key = get_machine_code() or ""
         if not api_key:
-            # Key 池为空时退化为机器码占位（提示未配置）
-            from ...utils.machine import get_machine_code
-            api_key = get_machine_code() or "未配置上游Key"
-            logger.warning("[_build_config_json] 上游 Key 池为空，apiKey 使用机器码占位")
+            logger.warning("[_build_config_json] 未找到 buddyKey，请先激活卡密")
 
         # 从动态服务端地址列表中随机取一个作为上游 URL
         from ...utils.server_api import _fetch_server_list
-        import random as _random
         servers = _fetch_server_list()
         if servers:
             upstream_base = _random.choice(servers)
@@ -852,35 +838,31 @@ class DashboardPage(QWidget):
         upstream_base = upstream_base.rstrip("/")
         url = f"{upstream_base}/v1/chat/completions"
 
-        # 固定模型列表
-        _FIXED_MODELS = [
-            {"id": "auto",              "name": "Auto",            "maxInputTokens": 128000,  "maxOutputTokens": 8192},
-            {"id": "Hy3",               "name": "Hy3",             "maxInputTokens": 192000,  "maxOutputTokens": 8192},
-            {"id": "GLM-5.2",           "name": "GLM-5.2",         "maxInputTokens": 1000000, "maxOutputTokens": 8192},
-            {"id": "GLM-5.1",           "name": "GLM-5.1",         "maxInputTokens": 200000,  "maxOutputTokens": 8192},
-            {"id": "GLM-5V-Turbo",      "name": "GLM-5V-Turbo",   "maxInputTokens": 200000,  "maxOutputTokens": 8192},
-            {"id": "MiniMax-M3",        "name": "MiniMax-M3",     "maxInputTokens": 512000,  "maxOutputTokens": 8192},
-            {"id": "Kimi-K2.7-Code",    "name": "Kimi-K2.7-Code", "maxInputTokens": 256000,  "maxOutputTokens": 8192},
-            {"id": "Kimi-K2.6",         "name": "Kimi-K2.6",      "maxInputTokens": 256000,  "maxOutputTokens": 8192},
-            {"id": "DeepSeek-V4-Flash", "name": "DeepSeek-V4-Flash", "maxInputTokens": 1000000, "maxOutputTokens": 8192},
-            {"id": "DeepSeek-V4-Pro",   "name": "DeepSeek-V4-Pro","maxInputTokens": 1000000, "maxOutputTokens": 8192},
-        ]
+        # 从服务端动态获取模型列表
+        from ...utils.server_api import get_proxy_models
+        server_models = get_proxy_models()
+        if not server_models:
+            logger.warning("[_build_config_json] 从服务端获取模型列表失败，跳过配置")
+            return json.dumps({"models": []}, ensure_ascii=False, indent=2)
 
         models = []
-        for m in _FIXED_MODELS:
+        for m in server_models:
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
             models.append({
-                "id": m["id"],
-                "name": m["name"],
-                "vendor": "Buddy",
+                "id": m.get("id", ""),
+                "name": m.get("name") or m.get("id", ""),
+                "vendor": m.get("vendor", "Buddy"),
                 "apiKey": api_key,
                 "url": url,
-                "maxInputTokens": m["maxInputTokens"],
-                "maxOutputTokens": m["maxOutputTokens"],
-                "supportsToolCall": True,
-                "supportsImages": True,
-                "supportsReasoning": True,
+                "maxInputTokens": m.get("maxInputTokens", 128000),
+                "maxOutputTokens": m.get("maxOutputTokens", 8192),
+                "supportsToolCall": m.get("supportsToolCall", True),
+                "supportsImages": m.get("supportsImages", True),
+                "supportsReasoning": m.get("supportsReasoning", True),
             })
 
+        logger.info(f"[_build_config_json] 生成 {len(models)} 个模型配置，上游 {url}")
         return json.dumps({"models": models}, ensure_ascii=False, indent=2)
 
     def _apply_config(self, target_client: str = "workbuddy"):

@@ -121,11 +121,10 @@ def cmd_start(args):
 
     db = ProxyDatabase.get_instance()
 
-    # 检查是否有上游 Key
-    upstream_keys = db.get_upstream_keys()
-    if not upstream_keys:
-        # BuddyKey 现通过激活卡密获取，启动时不再自动获取
-        print("\n❌ 没有上游 Key，请先激活卡密获取 BuddyKey")
+    # 检查是否已激活卡密（buddyKey）
+    from .utils.machine import get_machine_code
+    if not get_machine_code():
+        print("\n❌ 未激活，请先激活卡密获取 BuddyKey")
         print("   运行: python -m src.cli redeem <卡密>")
         return 1
 
@@ -164,81 +163,39 @@ def cmd_start(args):
 def cmd_config(args):
     """展示配置 JSON"""
     _print_header("客户端配置")
-    from .modules.proxy_server import ProxyDatabase, SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
-    from .utils.store import load_setting
+    from .utils.machine import get_machine_code
+    from .utils.server_api import _fetch_server_list, get_proxy_models
+    import random as _random
 
-    port = int(load_setting("proxy_port", "8002"))
-    db = ProxyDatabase.get_instance()
-    sub_keys = db.get_sub_api_keys()
-    api_key = sub_keys[0].get("api_key", "") if sub_keys else ""
-    url = f"http://127.0.0.1:{port}/v1/chat/completions"
+    api_key = get_machine_code() or ""
+    servers = _fetch_server_list()
+    upstream_base = _random.choice(servers).rstrip("/") if servers else ""
+    if not upstream_base:
+        print("⚠️  无可用服务端地址")
+        return 1
+    url = f"{upstream_base}/v1/chat/completions"
 
-    # 优先从服务端获取模型列表
+    # 从服务端动态获取模型列表（/api/proxy/models 明文 GET）
     models = []
-    try:
-        from .utils.server_api import get_models_list
-        result = get_models_list()
-        if result and not result.get("error") and result.get("models"):
-            for m in result["models"]:
-                model_id = m.get("id", "")
-                if not model_id:
-                    continue
-                models.append({
-                    "id": model_id,
-                    "name": m.get("name", model_id),
-                    "vendor": "Buddy",
-                    "apiKey": api_key,
-                    "url": url,
-                    "maxInputTokens": m.get("maxInputTokens", 128000),
-                    "maxOutputTokens": m.get("maxOutputTokens", 8192),
-                    "supportsToolCall": m.get("supportsToolCall", True),
-                    "supportsImages": m.get("supportsImages", True),
-                    "supportsReasoning": m.get("supportsReasoning", True),
-                })
-    except Exception as e:
-        print(f"⚠️  从服务端获取模型列表失败: {e}")
+    server_models = get_proxy_models()
+    for m in server_models:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        models.append({
+            "id": m.get("id", ""),
+            "name": m.get("name") or m.get("id", ""),
+            "vendor": m.get("vendor", "Buddy"),
+            "apiKey": api_key,
+            "url": url,
+            "maxInputTokens": m.get("maxInputTokens", 128000),
+            "maxOutputTokens": m.get("maxOutputTokens", 8192),
+            "supportsToolCall": m.get("supportsToolCall", True),
+            "supportsImages": m.get("supportsImages", True),
+            "supportsReasoning": m.get("supportsReasoning", True),
+        })
 
-    # fallback 本地硬编码
     if not models:
-        _name_map = {
-            "auto": "自动模式（智能选择）",
-            "deepseek-v4-pro": "DeepSeek V4 Pro",
-            "deepseek-v4-flash": "DeepSeek V4 Flash",
-            "deepseek-v3-2-volc": "DeepSeek V3.2",
-            "deepseek-v3-1": "DeepSeek V3.1",
-            "deepseek-v3-0324": "DeepSeek V3-0324",
-            "deepseek-r1": "DeepSeek R1",
-            "glm-5.2": "GLM-5.2",
-            "glm-5.1": "GLM-5.1",
-            "glm-5.0": "GLM-5.0",
-            "glm-5.0-turbo": "GLM-5.0 Turbo",
-            "glm-5v-turbo": "GLM-5v Turbo",
-            "glm-4.7": "GLM-4.7",
-            "glm-4.6": "GLM-4.6",
-            "minimax-m3": "MiniMax M3",
-            "minimax-m2.7": "MiniMax M2.7",
-            "minimax-m2.5": "MiniMax M2.5",
-            "kimi-k2.6": "Kimi K2.6",
-            "kimi-k2.5": "Kimi K2.5",
-            "kimi-k2.7": "Kimi K2.7",
-            "hy3": "Hy3",
-            "hy3-preview": "Hy3 Preview",
-            "hunyuan-chat": "Hunyuan Chat",
-            "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
-        }
-        for m in SUPPORTED_MODELS:
-            models.append({
-                "id": m,
-                "name": _name_map.get(m, m),
-                "vendor": "Buddy",
-                "apiKey": api_key,
-                "url": url,
-                "maxInputTokens": MODEL_CONTEXT_LENGTHS.get(m, 128000),
-                "maxOutputTokens": MODEL_MAX_OUTPUT_TOKENS.get(m, 8192),
-                "supportsToolCall": True,
-                "supportsImages": True,
-                "supportsReasoning": True,
-            })
+        print("⚠️  从服务端获取模型列表失败")
 
     config = {"models": models}
     print(json.dumps(config, ensure_ascii=False, indent=2))
@@ -296,18 +253,15 @@ def cmd_info(args):
     except Exception as e:
         print(f"  读取失败: {e}")
 
-    # 上游 Key
-    print(f"\n🔗 上游 Key:")
+    # BuddyKey
+    print(f"\n🔗 BuddyKey:")
     try:
-        upstream_keys = db.get_upstream_keys()
-        if upstream_keys:
-            for uk in upstream_keys:
-                _print_kv("Key ID", uk.get("key_id", ""), indent=1)
-                _print_kv("标签", uk.get("label", ""), indent=1)
-                _print_kv("状态", uk.get("status", ""), indent=1)
-                _print_kv("积分", uk.get("points", ""), indent=1)
+        from .utils.machine import get_machine_code
+        buddy_key = get_machine_code()
+        if buddy_key:
+            _print_kv("BuddyKey", buddy_key[:20] + "...", indent=1)
         else:
-            print("  （未配置）")
+            print("  （未激活）")
     except Exception as e:
         print(f"  读取失败: {e}")
 

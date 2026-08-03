@@ -22,12 +22,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QTimer, Signal as QSignal, Signal
 from PySide6.QtGui import QCursor, QColor, QBrush, QFont
 
-from ...i18n import t
+
 from ...utils.store import save_setting, load_setting, load_accounts
 from ..styles.theme import LIGHT_THEME, DARK_THEME
-from ...modules.proxy_server import (
-    ProxyServer, SUPPORTED_MODELS, ProxyDatabase, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
-)
+from ...modules.proxy_server import ProxyServer, ProxyDatabase
 
 
 def _fmt_tokens(n: int) -> str:
@@ -110,29 +108,6 @@ def _style_popup_menu(menu):
             margin: 4px 8px;
         }}
     """)
-
-
-def _apply_context_aliases(entry: dict, context_tokens: int):
-    """Write common context-window field names for different clients."""
-    if context_tokens:
-        max_output_tokens = min(MODEL_MAX_OUTPUT_TOKENS.get(entry.get("id"), 131072), context_tokens)
-        entry["maxInputTokens"] = context_tokens
-        entry["max_input_tokens"] = context_tokens
-        entry["maxOutputTokens"] = max_output_tokens
-        entry["max_output_tokens"] = max_output_tokens
-        entry["maxTokens"] = max_output_tokens
-        entry["contextWindow"] = context_tokens
-        entry["contextLength"] = context_tokens
-        entry["context_length"] = context_tokens
-        entry["maxContextTokens"] = context_tokens
-        entry["maxAllowedSize"] = context_tokens
-        entry["max_allowed_size"] = context_tokens
-    return entry
-
-
-def _apply_model_protocol_fields(entry: dict, images: bool):
-    """Add WorkBuddy catalog-style fields used by newer model capability checks."""
-    return entry
 
 
 def _read_existing_models(target_path: str) -> list:
@@ -412,9 +387,15 @@ class CreateSubKeyDialog(QDialog):
             self._label_input.setText(self._edit_data.get("label", ""))
         layout.addRow("标签:", self._label_input)
 
-        # 允许的模型 — 多选下拉
+        # 允许的模型 — 多选下拉（从服务端动态获取）
+        from ...utils.server_api import get_proxy_models
+        _server_models = get_proxy_models()
+        _model_ids = [
+            m.get("id", "") for m in _server_models
+            if isinstance(m, dict) and m.get("id") and m.get("id") != "auto"
+        ]
         self._model_list_widget = self._create_multi_select(
-            items=["全部模型"] + [m for m in SUPPORTED_MODELS if m != "auto"],
+            items=["全部模型"] + _model_ids,
             selected=self._edit_data.get("allowed_models", []) if self._edit_data else [],
             all_option="全部模型",
         )
@@ -775,7 +756,7 @@ class ApiProxyPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        title = QLabel(t("api_proxy.title"))
+        title = QLabel("API 代理服务")
         title.setObjectName("page_title")
         layout.addWidget(title)
 
@@ -978,71 +959,6 @@ class ApiProxyPage(QWidget):
             except Exception:
                 pass
         return ips
-
-    def _toggle_service(self):
-        """启动/停止代理服务"""
-        self._sync_controls_from_dashboard()
-        if self._proxy_server and self._proxy_server.is_running:
-            self._proxy_server.stop()
-            self._proxy_server = None
-            # 服务停止后恢复独立 db 实例（从文件重新加载）
-            self._db = ProxyDatabase.get_instance()
-            self._status_label.setText("⏹ 已停止")
-            self._status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-            self._toggle_btn.setText("▶ 启动服务")
-            self._toggle_btn.setObjectName("primary_btn")
-            self._port_spin.setEnabled(True)
-        else:
-            port = self._port_spin.value()
-            mode = "open"
-            host = "0.0.0.0"
-            self._cleanup_legacy_models_on_start(port, mode)
-
-            self._proxy_server = ProxyServer(host=host, port=port, mode=mode)
-
-            if self._proxy_server.start():
-                # 关键：使用 ProxyServer 的 db 实例，确保日志读写共享同一内存
-                # 否则页面自己的 _db 实例看不到服务端写入的日志
-                self._db = self._proxy_server.db
-                save_setting("proxy_port", str(port))
-                self._status_label.setText(f"▶ 运行中 :{port}")
-                self._status_label.setStyleSheet("font-weight: 600; color: #38A169;")
-                self._toggle_btn.setText("⏹ 停止服务")
-                self._toggle_btn.setObjectName("danger_btn")
-                ips = self._get_local_ips()
-                display_host = ips[0] if ips else "0.0.0.0"
-                self._url_label.setText(f"http://{display_host}:{port}/v1")
-                self._port_spin.setEnabled(False)
-            else:
-                QMessageBox.warning(self, "启动失败", f"无法在端口 {port} 启动代理服务，可能端口已被占用")
-
-    def _proxy_base_urls_for_port(self, port: int, mode: str) -> set[str]:
-        hosts = {"127.0.0.1", "localhost", "0.0.0.0"}
-        hosts.update(self._get_local_ips())
-        return {_normal_url(f"http://{host}:{port}/v1") for host in hosts if host}
-
-    def _cleanup_legacy_models_on_start(self, port: int, mode: str) -> int:
-        """Normalize old generated WorkBuddy/CodeBuddy model entries before starting."""
-        proxy_base_urls = self._proxy_base_urls_for_port(port, mode)
-        targets = [
-            (os.path.join(os.path.expanduser("~"), ".workbuddy", "models.json"), "array", "WorkBuddy"),
-            (os.path.join(os.path.expanduser("~"), ".codebuddy", "models.json"), "object", "CodeBuddy"),
-        ]
-        cleaned_total = 0
-        for target_path, wrapper, label in targets:
-            try:
-                cleaned = _cleanup_legacy_proxy_models(target_path, wrapper, proxy_base_urls)
-                cleaned_total += cleaned
-                if cleaned:
-                    print(f"[models.json] {label} cleaned {cleaned} legacy model(s): {target_path}")
-            except Exception as e:
-                print(f"[models.json] {label} cleanup failed: {e}")
-        return cleaned_total
-
-    def _copy_url(self):
-        """复制服务地址"""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self._url_label.text())
 
     # === 上游 Key 管理 ===
 
@@ -2416,46 +2332,6 @@ class ApiProxyPage(QWidget):
             f"使用上游 Key: {key_label or key_id}\n\n"
             f"文件位置:\n{target_path}"
         )
-
-    def _delete_workbuddy_config(self):
-        """删除 WorkBuddy 的 models.json 配置文件"""
-        import os
-        target_path = os.path.join(os.path.expanduser("~"), ".workbuddy", "models.json")
-        if not os.path.exists(target_path):
-            QMessageBox.information(self, "提示", "WorkBuddy 配置文件不存在，无需删除。\n\n路径: %USERPROFILE%\\.workbuddy\\models.json")
-            return
-        reply = QMessageBox.warning(
-            self, "⚠️ 确认删除",
-            f"确定删除 WorkBuddy 配置文件？\n\n路径:\n{target_path}\n\n删除后 WorkBuddy 将无法使用已配置的模型。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                os.remove(target_path)
-                QMessageBox.information(self, "✅ 删除成功", f"WorkBuddy 配置文件已删除！\n\n{target_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "删除失败", f"删除文件时出错：\n{e}")
-
-    def _delete_codebuddy_config(self):
-        """删除 CodeBuddy 的 models.json 配置文件"""
-        import os
-        target_path = os.path.join(os.path.expanduser("~"), ".codebuddy", "models.json")
-        if not os.path.exists(target_path):
-            QMessageBox.information(self, "提示", "CodeBuddy 配置文件不存在，无需删除。\n\n路径: %USERPROFILE%\\.codebuddy\\models.json")
-            return
-        reply = QMessageBox.warning(
-            self, "⚠️ 确认删除",
-            f"确定删除 CodeBuddy 配置文件？\n\n路径:\n{target_path}\n\n删除后 CodeBuddy 将无法使用已配置的模型。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                os.remove(target_path)
-                QMessageBox.information(self, "✅ 删除成功", f"CodeBuddy 配置文件已删除！\n\n{target_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "删除失败", f"删除文件时出错：\n{e}")
 
     def _toggle_sub_key(self, key_id: str, enable: bool):
         """启用/禁用子 Key"""

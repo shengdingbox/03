@@ -2,7 +2,6 @@
 
 import secrets
 import logging
-from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit,
@@ -13,7 +12,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QCursor
 
-from ...i18n import t
+
 from ...models import Account, Platform, AccountStatus, ResourcePackage
 from ...utils.store import load_accounts, save_account, delete_account, save_setting, load_setting
 from ...modules.api_client import ApiClient, check_api_key_chat_status
@@ -22,7 +21,7 @@ from .dashboard import StatCard, CacheHitRateChart
 
 logger = logging.getLogger(__name__)
 
-PAGE_SIZE = 100  # 每页显示条数
+PAGE_SIZE = 20  # 每页显示条数（服务端分页）
 
 
 def _current_theme_colors() -> dict:
@@ -86,7 +85,7 @@ class AddAccountDialog(QDialog):
         self._btn_redeem.clicked.connect(self._do_redeem)
         btn_row.addWidget(self._btn_redeem)
 
-        btn_cancel = QPushButton(t("common.cancel"))
+        btn_cancel = QPushButton("取消")
         btn_cancel.setObjectName("secondary_btn")
         btn_cancel.setCursor(Qt.PointingHandCursor)
         btn_cancel.setMinimumHeight(36)
@@ -101,7 +100,7 @@ class AddAccountDialog(QDialog):
         """明文 POST 到激活接口"""
         card_key = self._input.text().strip()
         if not card_key:
-            QMessageBox.warning(self, t("common.warning"), "请输入卡密")
+            QMessageBox.warning(self, "警告", "请输入卡密")
             return
 
         self._btn_redeem.setEnabled(False)
@@ -180,28 +179,14 @@ class AddAccountDialog(QDialog):
         )
         save_account(account)
 
-        # 同步上游 Key 池（buddyKey 作为 api_key，faceValue 作为积分）
+        # 缓存积分余额
         try:
             from ...modules.proxy_server import ProxyDatabase
             proxy_db = ProxyDatabase.get_instance()
-            existing_api_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-            if buddy_key not in existing_api_keys:
-                proxy_db.add_upstream_key({
-                    "key_id": f"ck_{secrets.token_hex(4)}",
-                    "api_key": buddy_key,
-                    "label": nickname,
-                    "status": "active",
-                    "used_count": 0,
-                    "points": str(face_value) if face_value else "",
-                    "points_updated_at": datetime.now().isoformat(),
-                    "created_at": datetime.now().isoformat(),
-                })
-            # 缓存积分余额（供代理转发时余额校验使用）
             proxy_db.save_cached_credits({"credits": face_value})
-            # 不再写入子 API Key 池 — 系统已取消子Key池概念，只用 buddyKey（机器码）鉴权
         except Exception as e:
             import logging as _logging
-            _logging.getLogger(__name__).warning(f"[激活] 同步上游Key失败: {e}", exc_info=True)
+            _logging.getLogger(__name__).warning(f"[激活] 缓存积分失败: {e}", exc_info=True)
 
         # 通知刷新
         self.account_added.emit(account)
@@ -394,7 +379,7 @@ class AccountsPage(QWidget):
             return
 
         # 独立模式：保留原页面标题/副标题/滚动容器
-        title = QLabel(t("accounts.title"))
+        title = QLabel("额度管理")
         title.setObjectName("page_title")
         layout.addWidget(title)
 
@@ -874,19 +859,6 @@ class AccountsPage(QWidget):
             account.quota.last_updated = datetime.now()
             save_account(account)
 
-            # 联动更新上游 Key 池
-            try:
-                from ...modules.proxy_server import ProxyDatabase
-                db = ProxyDatabase.get_instance()
-                db.sync_quota_to_key(
-                    api_key_or_token=getattr(account, "api_key", None) or account.auth_token,
-                    remaining_credits=remaining,
-                    total_credits=total,
-                    packages=packages,
-                )
-            except Exception:
-                pass
-
             self.quota_updated.emit()  # 通知其他页面刷新
 
             dialog = CreditsDetailDialog(account, self)
@@ -941,18 +913,6 @@ class AccountsPage(QWidget):
                     acc.quota.packages = packages
                     acc.quota.last_updated = datetime.now()
                     save_account(acc)
-                    # 联动更新上游 Key 池
-                    try:
-                        from ...modules.proxy_server import ProxyDatabase
-                        db = ProxyDatabase.get_instance()
-                        db.sync_quota_to_key(
-                            api_key_or_token=getattr(acc, "api_key", None) or acc.auth_token,
-                            remaining_credits=remaining,
-                            total_credits=total,
-                            packages=packages,
-                        )
-                    except Exception:
-                        pass
                     self.quota_updated.emit()  # 通知其他页面刷新
                     break
 
@@ -1044,18 +1004,6 @@ class AccountsPage(QWidget):
                                         acc.quota.packages = result.get("packages", [])
                                         acc.quota.last_updated = datetime.now()
                                         save_account(acc)
-                                        # 联动更新上游 Key 池
-                                        try:
-                                            from ...modules.proxy_server import ProxyDatabase
-                                            db = ProxyDatabase.get_instance()
-                                            db.sync_quota_to_key(
-                                                api_key_or_token=getattr(acc, "api_key", None) or acc.auth_token,
-                                                remaining_credits=remaining,
-                                                total_credits=total,
-                                                packages=result.get("packages", []),
-                                            )
-                                        except Exception:
-                                            pass
                                         break
                         except Exception:
                             pass
@@ -1322,7 +1270,7 @@ class AccountsPage(QWidget):
         if not selected:
             return
         if not rows:
-            QMessageBox.warning(self, t("common.warning"), "选中的账号没有可导出的 API Key")
+            QMessageBox.warning(self, "警告", "选中的账号没有可导出的 API Key")
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -1341,33 +1289,13 @@ class AccountsPage(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "导出失败", f"无法写入文件：{e}")
 
-    def _sync_delete_key_pool(self, account: Account):
-        """删除账号时同步删除 Key 池中对应的 Key"""
-        try:
-            from ...modules.proxy_server import ProxyDatabase
-            proxy_db = ProxyDatabase.get_instance()
-            keys = proxy_db.get_upstream_keys()
-            # 用 api_key 或 auth_token 匹配
-            tokens_to_remove = set()
-            if account.api_key:
-                tokens_to_remove.add(account.api_key)
-            if account.auth_token:
-                tokens_to_remove.add(account.auth_token)
-            for k in keys:
-                if k.get("api_key", "") in tokens_to_remove:
-                    proxy_db.delete_upstream_key(k["key_id"])
-        except Exception:
-            pass  # Key池删除失败不影响账号删除
-
     def _delete_account(self, account: Account):
         reply = QMessageBox.question(
-            self, t("common.confirm"),
-            f"确定要删除账号 {account.display_name} 吗？",
+            self, "确认",
+            f"确定要删除账号 {account.nickname or account.uid or '未知账号'} 吗？",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            # 同步删除 Key 池中对应的 Key
-            self._sync_delete_key_pool(account)
             delete_account(account.uid)
             self._refresh_table()
 
@@ -1392,7 +1320,6 @@ class AccountsPage(QWidget):
         )
         if reply == QMessageBox.Yes:
             for account in selected:
-                self._sync_delete_key_pool(account)
                 delete_account(account.uid)
             self._refresh_table()
 
@@ -1425,7 +1352,8 @@ class UsageLogDialog(QDialog):
 
         self._colors = colors or _current_theme_colors()
         self._usage_logs = []
-        self._current_page = 0
+        self._current_page = 0  # 0-based 内部页码
+        self._total = 0         # 服务端返回的总记录数
 
         self._setup_ui()
         self._refresh_usage_table()
@@ -1461,7 +1389,14 @@ class UsageLogDialog(QDialog):
             "时间", "模型", "请求Token", "响应Token", "总Token", "扣除积分"
         ])
         usage_header_obj = self._usage_table.horizontalHeader()
-        usage_header_obj.setSectionResizeMode(QHeaderView.Stretch)
+        # 时间列固定宽度（150px），其余列自适应拉伸
+        self._usage_table.setColumnWidth(0, 160)
+        usage_header_obj.setSectionResizeMode(0, QHeaderView.Interactive)
+        usage_header_obj.setSectionResizeMode(1, QHeaderView.Stretch)
+        usage_header_obj.setSectionResizeMode(2, QHeaderView.Stretch)
+        usage_header_obj.setSectionResizeMode(3, QHeaderView.Stretch)
+        usage_header_obj.setSectionResizeMode(4, QHeaderView.Stretch)
+        usage_header_obj.setSectionResizeMode(5, QHeaderView.Stretch)
         self._usage_table.setAlternatingRowColors(True)
         self._usage_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._usage_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1504,9 +1439,11 @@ class UsageLogDialog(QDialog):
         btn_row.addWidget(btn_close)
         layout.addLayout(btn_row)
 
-    # === 翻页逻辑 ===
+    # === 翻页逻辑（服务端分页） ===
     def _total_pages(self) -> int:
-        return max(1, (len(self._usage_logs) + PAGE_SIZE - 1) // PAGE_SIZE)
+        if self._total <= 0:
+            return 1
+        return (self._total + PAGE_SIZE - 1) // PAGE_SIZE
 
     def _update_pager(self):
         total = self._total_pages()
@@ -1521,51 +1458,50 @@ class UsageLogDialog(QDialog):
     def _prev_page(self):
         if self._current_page > 0:
             self._current_page -= 1
-            self._render_usage_page()
+            self._refresh_usage_table()
 
     def _next_page(self):
         if self._current_page < self._total_pages() - 1:
             self._current_page += 1
-            self._render_usage_page()
+            self._refresh_usage_table()
 
     def _goto_page(self, page: int):
         if page >= 1 and page <= self._total_pages():
             self._current_page = page - 1
-            self._render_usage_page()
+            self._refresh_usage_table()
 
     def _render_usage_page(self):
-        """渲染当前页的消耗明细"""
-        start = self._current_page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        page_logs = self._usage_logs[start:end]
+        """渲染当前页的消耗明细（直接使用服务端返回的当前页数据）"""
+        page_logs = self._usage_logs
 
         self._usage_table.setRowCount(len(page_logs))
         for row, log in enumerate(reversed(page_logs)):
-            ts = log.get("timestamp", 0)
-            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
+            # 服务端返回 createdAt 格式 "YYYY-MM-DD HH:MM:SS"
+            ts_text = log.get("createdAt") or "-"
             self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
-            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
-            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
-            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
-            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
-            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
-            credits = log.get("credits", 0)
-            self._usage_table.setItem(row, 5, QTableWidgetItem(f"{credits:.2f}" if credits else "-"))
+            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model") or "-"))
+            prompt_tokens = log.get("promptTokens", 0) or 0
+            completion_tokens = log.get("completionTokens", 0) or 0
+            self._usage_table.setItem(row, 2, QTableWidgetItem(str(prompt_tokens)))
+            self._usage_table.setItem(row, 3, QTableWidgetItem(str(completion_tokens)))
+            self._usage_table.setItem(row, 4, QTableWidgetItem(str(prompt_tokens + completion_tokens)))
+            amount = log.get("amount", 0) or 0
+            self._usage_table.setItem(row, 5, QTableWidgetItem(f"{amount:.2f}" if amount else "-"))
         self._update_pager()
 
     def _refresh_usage_table(self):
-        """刷新消耗明细表格（从 ProxyDatabase 读取最近的 request_logs）"""
+        """刷新消耗明细表格（从服务端 /api/user/today-usage 分页获取）"""
         try:
-            from ...modules.proxy_server import ProxyDatabase
-            db = ProxyDatabase.get_instance()
-            logs = db.get_request_logs(limit=10000)  # 全部读取，弹窗内分页展示
+            from ...utils.server_api import get_today_usage
+            records, total = get_today_usage(page=self._current_page + 1, page_size=PAGE_SIZE)
         except Exception as e:
             logger.error(f"加载使用记录失败: {e}")
-            logs = []
-        # 只显示有 token 消耗的记录
-        self._usage_logs = [
-            l for l in logs
-            if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0
-        ]
-        self._current_page = 0
+            records, total = [], 0
+        self._usage_logs = records if isinstance(records, list) else []
+        self._total = total or 0
+        # 当前页超出范围时回退到第一页
+        if self._current_page >= self._total_pages() and self._current_page > 0:
+            self._current_page = 0
+            self._refresh_usage_table()
+            return
         self._render_usage_page()
