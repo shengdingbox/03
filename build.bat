@@ -37,7 +37,6 @@ venv\Scripts\python.exe -m nuitka ^
     --include-package=certifi ^
     --include-package=idna ^
     --include-data-dir=assets=assets ^
-    --include-data-dir=src\i18n=src\i18n ^
     --include-data-file=src\VERSION=src\VERSION ^
     --output-dir=dist ^
     --output-filename="BuddyToolNew.exe" ^
