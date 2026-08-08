@@ -36,8 +36,7 @@ logger = logging.getLogger(__name__)
 
 # === API 基础 URL ===
 # 关键：积分/签到 API 在 copilot.tencent.com，不在 codebuddy.cn
-from ..utils._obfuscate import get as _obf_get
-BILLING_API_BASE = _obf_get("BILLING_API_BASE")
+BILLING_API_BASE = "https://copilot.tencent.com"
 
 # === API 路径 ===
 BILLING_API_PATHS = {
@@ -45,7 +44,7 @@ BILLING_API_PATHS = {
 }
 
 # Keycloak token refresh 端点
-KEYCLOAK_TOKEN_URL = _obf_get("KEYCLOAK_TOKEN_URL")
+KEYCLOAK_TOKEN_URL = "https://www.codebuddy.cn/auth/realms/copilot/protocol/openid-connect/token"
 KEYCLOAK_CLIENT_ID = "console"
 
 
@@ -73,7 +72,7 @@ def check_api_key_chat_status(api_key: str, attempts: int = 3, proxy: Optional[s
             "body": str,
         }
     """
-    url = _obf_get("CHAT_COMPLETIONS_URL")
+    url = "https://copilot.tencent.com/v2/chat/completions"
     payload = {
         "model": "auto",
         "stream": True,

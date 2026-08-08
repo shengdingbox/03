@@ -42,8 +42,7 @@ logger = logging.getLogger(__name__)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
 
 # 旧版 XXTEA 密钥（仅用于读取旧格式数据时回退解密）
-from ..utils._obfuscate import get_bytes as _obf_bytes
-_XXTEA_KEY_LEGACY = _obf_bytes("XXTEA_KEY")
+_XXTEA_KEY_LEGACY = b"AT-XTEA-2026"
 
 
 def _xxtea_mx(sum_: int, y: int, z: int, p: int, key: list) -> int:

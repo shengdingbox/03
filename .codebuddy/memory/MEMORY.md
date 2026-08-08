@@ -3,7 +3,7 @@
 ## 项目概述
 - **名称**: BuddyToolNew（⚡ BuddyToolNew）
 - **定位**: 多平台 IDE 工具管理器 — WorkBuddy / CodeBuddy 批量签到、API Key 代理、积分管理
-- **技术栈**: Python 3.11+ / PySide6 (Qt6) / SQLite / Nuitka 打包（onefile 模式）
+- **技术栈**: Python 3.11+ / PySide6 (Qt6) / SQLite / PyInstaller 打包（onefile，spec 文件）
 - **仓库**: https://github.com/qinchangxv/buddytoolnew
 - **当前版本**: v1.1.8（src/VERSION）
 - **许可**: MIT
@@ -23,7 +23,7 @@
 ## 项目结构
 ```
 buddytoolnew/
-├── app.py                 # Nuitka 打包入口，importlib 动态加载 src.main
+├── app.py                 # 打包入口，importlib 动态加载 src.main
 ├── src/                   # 核心源码包
 │   ├── main.py            # 应用入口（日志、单实例、信号处理、QApplication）
 │   ├── main_window.py     # 主窗口（侧边栏 + QStackedWidget、托盘、自动更新）
@@ -55,7 +55,8 @@ buddytoolnew/
 ├── tests/                # 测试（test_model_config.py）
 ├── assets/icons/         # 应用图标
 ├── key/                  # Go 脚本（create_apikey.go，创建 codebuddy.cn API Key）
-├── build.bat             # Nuitka 一键打包（输出 BuddyToolNew.exe）
+├── build.bat             # PyInstaller 一键打包（输出 dist\BuddyToolNew.exe）
+├── BuddyToolNew.spec     # PyInstaller spec 文件（PySide6 DLL 白名单 + src hiddenimports）
 ├── publish.bat           # 更新包打包+上传（scp 到 /var/www/html/buddytoolnew/）
 ├── pyproject.toml        # uv 项目配置（name = "buddytoolnew"）
 ├── requirements.txt      # pip 依赖
@@ -77,15 +78,15 @@ buddytoolnew/
 - **API 基址**: 积分/签到 API 在 `https://copilot.tencent.com`，公开 API 在 `https://codebuddy.cn`，自建服务端 `http://47.83.145.136:8787`（卡密/兑换/BuddyKey/用量上报）
 - **代理上游**: `https://47.108.236.176/v1`（明文，透传请求和响应）。上游路径 `/chat/completions`、`/models`。用 buddyKey 作上游鉴权。
 - **单实例**: QLocalSocket/QLocalServer 实现，锁名 `buddytoolnew-single-instance`，支持唤醒已运行窗口
-- **打包**: Nuitka onefile 模式（`--windows-console-mode=disable`），app.py 用 importlib 动态加载 src.main
+- **打包**: PyInstaller onefile 模式（`BuddyToolNew.spec`），app.py 用 importlib 动态加载 src.main；spec 中需将 src 所有子模块加入 hiddenimports，pathex 设为项目根目录
 - **日志**: 控制台输出（GUI 模式动态 AttachConsole）
 
 ## 依赖
 - PySide6==6.8.3 (Qt6 GUI 框架)
 - requests==2.34.2 (HTTP 客户端)
 - cryptography==48.0.0
-- nuitka==2.7.12
-- pyinstaller==6.20.0（已弃用，保留依赖）
+- nuitka==2.7.12（已弃用）
+- pyinstaller==6.20.0（当前打包工具）
 - pysocks>=1.7.1
 
 ## 运行方式

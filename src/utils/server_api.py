@@ -18,7 +18,6 @@ import threading
 
 import requests as _requests_module
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from ._obfuscate import get as _obf_get, get_bytes as _obf_bytes
 from .ssl_pinning import install_pinning as _install_pinning
 
 logger = logging.getLogger(__name__)
@@ -37,11 +36,11 @@ _SERVER_LIST_TTL = 600  # 10 分钟缓存
 _LOCAL_MODE = False
 
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
-_AES_KEY = bytes.fromhex(_obf_get("AES_KEY_HEX"))
+_AES_KEY = bytes.fromhex("38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0")
 
 # HMAC-SHA256 签名
-_API_KEY = _obf_get("API_KEY")
-_HMAC_KEY = _obf_bytes("HMAC_KEY")
+_API_KEY = "buddy_707d23cb0832fb0f0fc4a3d7"
+_HMAC_KEY = b"db1a906d80eb73a82d3ded42ffb64be5"
 
 # 全局 Session，启用证书固定
 _session = _requests_module.Session()

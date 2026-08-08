@@ -18,9 +18,7 @@ from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
 
-from ._obfuscate import get as _obf_get
-
-_PINNED_SPKI_HASH = _obf_get("SERVER_SPKI_HASH")
+_PINNED_SPKI_HASH = "16c28b6c981e422990835db06024f6e369f6f2c803642c45348e1cb4bb24c2ba"
 
 # 需要启用 pinning 的域名（仅主域名，备用域名不固定证书）
 _PINNED_HOSTS = {"buddy.shengdingit.com"}

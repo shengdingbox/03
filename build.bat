@@ -1,68 +1,61 @@
 @echo off
 chcp 65001 >nul 2>nul
+
 echo ========================================
-echo   BuddyToolNew - 一键打包 EXE (Nuitka)
+echo   BuddyToolNew Build - PyInstaller
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
-if not exist "venv\Scripts\python.exe" (
-    echo [ERROR] venv not found!
+REM Check uv
+where uv >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] uv not found!
     pause
     exit /b 1
 )
 
-:::: 安装 Nuitka（如果没有）
-venv\Scripts\pip.exe show nuitka >nul 2>nul
+REM Add UPX to PATH for compression
+if exist "%~dp0tools\upx.exe" set PATH=%~dp0tools;%PATH%
+
+REM Sync dependencies
+echo Syncing dependencies...
+uv sync -q
 if errorlevel 1 (
-    echo 正在安装 Nuitka...
-    venv\Scripts\pip.exe install nuitka -q
+    echo [ERROR] uv sync failed!
+    pause
+    exit /b 1
 )
 
-:::: 清理旧构建
+REM Clean old build artifacts
+if exist "dist\BuddyToolNew.exe" del /q "dist\BuddyToolNew.exe"
 if exist "dist\BuddyToolNew" rmdir /s /q dist\BuddyToolNew
 if exist "build" rmdir /s /q build
 
-echo 正在打包，请稍候（Nuitka 首次编译约 5-10 分钟）...
+echo Building with .spec file, please wait...
 echo.
 
-venv\Scripts\python.exe -m nuitka ^
-    --onefile ^
-    --python-flag=no_docstrings ^
-    --windows-console-mode=disable ^
-    --enable-plugin=pyside6 ^
-    --include-package=charset_normalizer ^
-    --include-package=urllib3 ^
-    --include-package=certifi ^
-    --include-package=idna ^
-    --include-data-dir=assets=assets ^
-    --include-data-file=src\VERSION=src\VERSION ^
-    --output-dir=dist ^
-    --output-filename="BuddyToolNew.exe" ^
-    --assume-yes-for-downloads ^
-    app.py
+uv run python -m PyInstaller BuddyToolNew.spec --noconfirm
 
 if errorlevel 1 (
     echo.
-    echo [ERROR] 打包失败！
+    echo [ERROR] Build failed!
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================
-echo   打包成功！
-echo   输出文件: dist\BuddyToolNew.exe
+echo   Build OK!
+echo   Output: dist\BuddyToolNew.exe
 echo ========================================
 echo.
 
-:::: 显示文件大小
-for /f %%A in ('dir /b "dist\BuddyToolNew.exe"') do echo 文件: %%A
+for %%A in ("dist\BuddyToolNew.exe") do echo Size: %%~zA bytes
 
 echo.
-echo 将 dist\BuddyToolNew.exe 直接分发给用户即可
-echo 用户双击运行，无需安装 Python
+echo Done. Distribute dist\BuddyToolNew.exe to users.
 echo.
 
 pause
