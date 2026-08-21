@@ -8,4 +8,4 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
-start "" venv\Scripts\pythonw.exe -m src.main
+start "BuddyToolNew" venv\Scripts\python.exe -m src.cli %*

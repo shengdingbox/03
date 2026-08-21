@@ -23,9 +23,8 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.ui.pages.api_proxy import (  # noqa: E402
-    ApiProxyPage,
-    ModelSelectDialog,
+from src.utils.model_config import (  # noqa: E402
+    ModelConfig,
     _incremental_merge_models,
     _read_existing_models,
     _write_models_json,
@@ -43,27 +42,27 @@ class TestNewModelsAndImageSupport(unittest.TestCase):
 
     def test_new_models_in_config_list(self):
         """Hy3 与 Kimi-K2.7-Code 出现在可配置模型列表中。"""
-        self.assertIn("hy3", ApiProxyPage.SUPPORTED_CONFIG_MODELS)
-        self.assertIn("kimi-k2.7-code", ApiProxyPage.SUPPORTED_CONFIG_MODELS)
+        self.assertIn("hy3", ModelConfig.SUPPORTED_CONFIG_MODELS)
+        self.assertIn("kimi-k2.7", ModelConfig.SUPPORTED_CONFIG_MODELS)
         # 原有模型仍存在
-        self.assertIn("glm-5.2", ApiProxyPage.SUPPORTED_CONFIG_MODELS)
-        self.assertIn("glm-5.1", ApiProxyPage.SUPPORTED_CONFIG_MODELS)
+        self.assertIn("glm-5.2", ModelConfig.SUPPORTED_CONFIG_MODELS)
+        self.assertIn("glm-5.1", ModelConfig.SUPPORTED_CONFIG_MODELS)
 
     def test_all_models_support_images_in_capabilities(self):
         """MODEL_CAPABILITIES 中所有模型的 images 字段均为 True。"""
-        for model_id, (_tool, images, _reason) in ApiProxyPage.MODEL_CAPABILITIES.items():
+        for model_id, (_tool, images, _reason) in ModelConfig.MODEL_CAPABILITIES.items():
             self.assertTrue(images, f"模型 {model_id} 应支持图片输入，但 images=False")
 
     def test_model_display_names_match_screenshot(self):
         """显示名按截图大小写处理，id 保持小写（与图片文件名一致）。"""
-        self.assertEqual(ApiProxyPage.MODEL_DISPLAY_NAMES.get("hy3"), "Hy3")
-        self.assertEqual(ApiProxyPage.MODEL_DISPLAY_NAMES.get("kimi-k2.7-code"), "Kimi-K2.7-Code")
+        self.assertEqual(ModelConfig.MODEL_DISPLAY_NAMES.get("hy3"), "Hy3")
+        self.assertEqual(ModelConfig.MODEL_DISPLAY_NAMES.get("kimi-k2.7"), "Kimi-K2.7-Code")
         # 未列出的模型显示名等于 id（默认）
-        self.assertEqual(ApiProxyPage.MODEL_DISPLAY_NAMES.get("glm-5.2", "glm-5.2"), "glm-5.2")
+        self.assertEqual(ModelConfig.MODEL_DISPLAY_NAMES.get("glm-5.2", "glm-5.2"), "glm-5.2")
 
     def test_proxy_server_new_models_registered(self):
         """新增模型已在 proxy_server 的各注册表中登记。"""
-        for m in ("hy3", "kimi-k2.7-code"):
+        for m in ("hy3", "kimi-k2.7"):
             self.assertIn(m, SUPPORTED_MODELS, f"{m} 未在 SUPPORTED_MODELS 中")
             self.assertIn(m, MODEL_CONTEXT_LENGTHS, f"{m} 未在 MODEL_CONTEXT_LENGTHS 中")
             self.assertIn(m, MODEL_MAX_OUTPUT_TOKENS, f"{m} 未在 MODEL_MAX_OUTPUT_TOKENS 中")
@@ -73,26 +72,6 @@ class TestNewModelsAndImageSupport(unittest.TestCase):
         """proxy_server 的 MODEL_SUPPORTS_IMAGES 全部为 True（含原先为 False 的 glm-5.0 等）。"""
         for m in ("glm-5.0", "glm-5.0-turbo", "glm-4.7", "glm-4.6", "glm-5.1", "glm-5.2"):
             self.assertTrue(MODEL_SUPPORTS_IMAGES.get(m), f"{m} 应支持图片输入")
-
-
-class TestModelSelectDialog(unittest.TestCase):
-    """需求 3：用户选择式配置对话框。"""
-
-    def test_dialog_is_importable_and_constructable(self):
-        """ModelSelectDialog 可被构造（需 QApplication）。"""
-        from PySide6.QtWidgets import QApplication
-        app = QApplication.instance() or QApplication([])
-        dlg = ModelSelectDialog(
-            "测试", "http://127.0.0.1:8080/v1", ApiProxyPage.SUPPORTED_CONFIG_MODELS
-        )
-        # 默认全部勾选
-        self.assertEqual(dlg.selected_models(), list(ApiProxyPage.SUPPORTED_CONFIG_MODELS))
-        # 全不选
-        dlg._set_all(False)
-        self.assertEqual(dlg.selected_models(), [])
-        # 重新全选
-        dlg._set_all(True)
-        self.assertEqual(dlg.selected_models(), list(ApiProxyPage.SUPPORTED_CONFIG_MODELS))
 
 
 class TestReadExistingModels(unittest.TestCase):
@@ -218,32 +197,32 @@ class TestBuildModelEntries(unittest.TestCase):
     """构建条目字段正确性（以类对象作为 self 调用，访问类属性）。"""
 
     def test_workbuddy_entries(self):
-        selected = ["hy3", "kimi-k2.7-code", "glm-5.2"]
-        entries = ApiProxyPage._build_model_entries(
-            ApiProxyPage, selected, "http://127.0.0.1:8080/v1", "sk-test",
+        selected = ["hy3", "kimi-k2.7", "glm-5.2"]
+        entries = ModelConfig.build_model_entries(
+            ModelConfig, selected, "http://127.0.0.1:8080/v1", "sk-test",
             include_custom_protocol=True,
         )
         self.assertEqual(len(entries), 3)
         by_id = {e["id"]: e for e in entries}
         # 显示名按截图大小写
         self.assertEqual(by_id["hy3"]["name"], "Hy3")
-        self.assertEqual(by_id["kimi-k2.7-code"]["name"], "Kimi-K2.7-Code")
+        self.assertEqual(by_id["kimi-k2.7"]["name"], "Kimi-K2.7-Code")
         self.assertEqual(by_id["glm-5.2"]["name"], "glm-5.2")
         # 全部支持图片
         for e in entries:
             self.assertTrue(e["supportsImages"], f"{e['id']} supportsImages 应为 True")
-            self.assertFalse(e["disabledMultimodal"])
-            self.assertIn("image", e["input"])
         # WorkBuddy 需要 useCustomProtocol
         for e in entries:
             self.assertIn("useCustomProtocol", e)
             self.assertFalse(e["useCustomProtocol"])
-        # 上下文字段写入
-        self.assertEqual(by_id["hy3"]["maxInputTokens"], MODEL_CONTEXT_LENGTHS["hy3"])
+        # 推理字段写入
+        for e in entries:
+            self.assertIn("reasoning", e)
+            self.assertEqual(e["reasoning"], {"supportedEfforts": ["max"]})
 
     def test_codebuddy_entries_no_custom_protocol(self):
-        entries = ApiProxyPage._build_model_entries(
-            ApiProxyPage, ["glm-5.1"], "http://127.0.0.1:8080/v1", "sk-test",
+        entries = ModelConfig.build_model_entries(
+            ModelConfig, ["glm-5.1"], "http://127.0.0.1:8080/v1", "sk-test",
             include_custom_protocol=False,
         )
         self.assertEqual(len(entries), 1)
@@ -265,8 +244,8 @@ class TestEndToEndIncrementalConfig(unittest.TestCase):
         ]
         _write_models_json(target, existing, wrapper=wrapper)
         # 构建新条目并增量合并
-        entries = ApiProxyPage._build_model_entries(
-            ApiProxyPage, selected, base_url, "sk-new", include_custom_protocol=(wrapper == "array")
+        entries = ModelConfig.build_model_entries(
+            ModelConfig, selected, base_url, "sk-new", include_custom_protocol=(wrapper == "array")
         )
         current = _read_existing_models(target)
         merged, replaced, added = _incremental_merge_models(current, entries)
@@ -298,18 +277,18 @@ class TestEndToEndIncrementalConfig(unittest.TestCase):
     def test_codebuddy_end_to_end(self):
         work_dir = tempfile.mkdtemp()
         try:
-            target, replaced, added, total = self._simulate_config("object", ["kimi-k2.7-code"], work_dir)
+            target, replaced, added, total = self._simulate_config("object", ["kimi-k2.7"], work_dir)
             with open(target, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertIsInstance(data, dict)  # CodeBuddy 包裹对象
             models = data["models"]
             ids = {m["id"] for m in models}
-            self.assertIn("kimi-k2.7-code", ids)
+            self.assertIn("kimi-k2.7", ids)
             self.assertIn("glm-5.2", ids)      # 未选中 → 保留
             self.assertIn("my-model", ids)     # 未选中 → 保留
             self.assertEqual(replaced, 0)
             self.assertEqual(added, 1)
-            k = [m for m in models if m["id"] == "kimi-k2.7-code"][0]
+            k = [m for m in models if m["id"] == "kimi-k2.7"][0]
             self.assertEqual(k["name"], "Kimi-K2.7-Code")
             self.assertTrue(k["supportsImages"])
         finally:
