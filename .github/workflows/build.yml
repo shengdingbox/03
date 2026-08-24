@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（默认读取 src/VERSION）'
+        description: '版本号（默认读取 VERSION）'
         required: false
         default: ''
       publish:
@@ -32,226 +32,74 @@ on:
         default: true
 
 jobs:
-  build-windows:
-    if: ${{ github.event_name == 'push' || inputs.build_windows }}
-    runs-on: windows-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  build:
+    # Go 交叉编译：单矩阵在 Linux runner 上产出三平台产物
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, name: BuddyTool,  ext: .exe,  pkg: zip,      artifact: windows-build }
+          - { goos: darwin,  goarch: amd64, name: BuddyTool,  ext: '',    pkg: zip,      artifact: macos-intel-build }
+          - { goos: darwin,  goarch: arm64, name: BuddyTool,  ext: '',    pkg: zip,      artifact: macos-arm-build }
+          - { goos: linux,   goarch: amd64, name: buddy-tool, ext: '',    pkg: tar.gz,   artifact: linux-cli-build }
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
-          clean: true
+          go-version: '1.25.x'
+          cache: true
 
-      - name: Verify clean build source
-        shell: bash
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
         run: |
-          test -z "$(git status --porcelain)" || { git status --short; exit 1; }
+          VER=$(tr -d '\r\n' < VERSION)
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags "-s -w -X buddy.tool/cli/internal/version.injectedVersion=$VER" \
+            -o out/${{ matrix.name }}${{ matrix.ext }} .
+          ls -lh out/
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Package
+        run: |
+          cd out
+          if [ "${{ matrix.pkg }}" = "zip" ]; then
+            zip -r ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip ${{ matrix.name }}${{ matrix.ext }}
+          else
+            tar -czf ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.name }}${{ matrix.ext }}
+          fi
+
+      - uses: actions/upload-artifact@v4
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Build with Nuitka
-        run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --windows-icon-from-ico=assets/icons/app.ico --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
+          name: ${{ matrix.artifact }}
           path: |
-            dist/BuddyTool.exe
-
-  build-macos-intel:
-    if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-15-intel
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MACOSX_DEPLOYMENT_TARGET: "12"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-
-      - name: Verify clean build source
-        run: |
-          test -z "$(git status --porcelain)" || { git status --short; exit 1; }
-
-      - name: Install Rosetta
-        run: softwareupdate --install-rosetta --agree-to-license || true
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies (x86_64 via Rosetta)
-        run: |
-          arch -x86_64 python -m pip install --upgrade pip
-          arch -x86_64 python -m pip install -r requirements.txt
-
-      - name: Fix OpenSSL dependency scan issue
-        run: |
-          # Nuitka 在 macOS Intel 上扫描 Homebrew OpenSSL 的 libcrypto.dylib 时会报 FATAL 错误
-          # 解决方案：临时 unlink Homebrew openssl，让 Nuitka 使用 Python 自带的静态链接
-          brew unlink openssl@3 2>/dev/null || true
-
-      - name: Verify Python runs as x86_64
-        run: |
-          arch -x86_64 python -c "import platform; print(f'Python arch: {platform.machine()}')"
-          file $(arch -x86_64 python -c "import sys; print(sys.executable)")
-
-      - name: Build CLI with Nuitka (x86_64 via Rosetta)
-        run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
-
-      - name: Inspect dist output
-        run: |
-          echo "=== dist/ contents ==="
-          find dist -maxdepth 3 -type f -o -type d | head -50
-
-      - name: Verify app architecture
-        run: |
-          file "dist/BuddyTool"
-
-      - name: Package CLI binary
-        run: |
-          chmod +x "dist/BuddyTool"
-          cd dist && zip -r -y BuddyTool-Intel.zip BuddyTool
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-intel-build
-          path: |
-            dist/BuddyTool-Intel.zip
-
-  build-macos-arm:
-    if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-14
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      MACOSX_DEPLOYMENT_TARGET: "12"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-
-      - name: Verify clean build source
-        shell: bash
-        run: |
-          test -z "$(git status --porcelain)" || { git status --short; exit 1; }
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Verify native ARM Python
-        run: |
-          test "$(python -c 'import platform; print(platform.machine())')" = "arm64"
-
-      - name: Build CLI with Nuitka
-        run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
-
-      - name: Inspect dist output
-        run: |
-          echo "=== dist/ contents ==="
-          find dist -maxdepth 3 -type f -o -type d | head -50
-
-      - name: Verify ARM architecture
-        run: |
-          file "dist/BuddyTool" | grep -q 'arm64'
-
-      - name: Package CLI binary
-        run: |
-          chmod +x "dist/BuddyTool"
-          cd dist && zip -r -y BuddyTool-ARM.zip BuddyTool
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-arm-build
-          path: |
-            dist/BuddyTool-ARM.zip
-
-  build-linux-cli:
-    if: ${{ github.event_name == 'push' || inputs.build_linux }}
-    runs-on: ubuntu-22.04
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: true
-
-      - name: Verify clean build source
-        shell: bash
-        run: |
-          test -z "$(git status --porcelain)" || { git status --short; exit 1; }
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Build CLI with Nuitka
-        run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --include-package=charset_normalizer --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
-
-      - name: Verify build
-        run: |
-          test -x "dist/buddy-tool"
-          file "dist/buddy-tool"
-          chmod +x "dist/buddy-tool"
-          ./dist/buddy-tool help
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-cli-build
-          path: |
-            dist/buddy-tool
+            out/${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.pkg }}
 
   release:
     # Tag push alone never publishes. Manual dispatch must explicitly set publish=true.
     if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.publish == true }}
-    needs: [build-windows, build-macos-intel, build-macos-arm, build-linux-cli]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Determine version
         id: version
         run: |
-          SOURCE_VERSION=$(tr -d '\r\n' < src/VERSION)
+          SOURCE_VERSION=$(tr -d '\r\n' < VERSION)
           VERSION="${{ github.event.inputs.version }}"
           if [[ -z "$VERSION" ]]; then
             VERSION="$SOURCE_VERSION"
           fi
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version: $VERSION"; exit 1; }
-          [[ "$VERSION" == "$SOURCE_VERSION" ]] || { echo "Version mismatch: input=$VERSION, src/VERSION=$SOURCE_VERSION"; exit 1; }
+          [[ "$VERSION" == "$SOURCE_VERSION" ]] || { echo "Version mismatch: input=$VERSION, VERSION=$SOURCE_VERSION"; exit 1; }
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version $VERSION"
 
@@ -271,18 +119,20 @@ jobs:
           body: |
             ## Buddy Tool v${{ steps.version.outputs.version }}
 
+            Go 编译的单二进制 CLI，零依赖，跨平台。
+
             ### 下载
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x64 | BuddyTool.exe |
-            | macOS Intel | BuddyTool-Intel.zip |
-            | macOS ARM (M1/M2/M3) | BuddyTool-ARM.zip |
-            | Linux CLI | buddy-tool |
+            | Windows x64 | BuddyTool-windows-amd64.zip |
+            | macOS Intel | BuddyTool-darwin-amd64.zip |
+            | macOS ARM (M1/M2/M3) | BuddyTool-darwin-arm64.zip |
+            | Linux amd64 | buddy-tool-linux-amd64.tar.gz |
 
             ### 安装与使用（命令行）
 
-            **Windows**: 下载 `BuddyTool.exe`，在 CMD 或 PowerShell 中运行：
+            **Windows**: 解压 `BuddyTool-windows-amd64.zip`，在 CMD 或 PowerShell 中运行：
             ```
             BuddyTool.exe help               # 查看帮助
             BuddyTool.exe info               # 展示当前信息
@@ -291,15 +141,16 @@ jobs:
             BuddyTool.exe restore-config workbuddy  # 还原 WorkBuddy 配置
             ```
 
-            **macOS**: 下载 `BuddyTool-Intel.zip`（Intel）或 `BuddyTool-ARM.zip`（M1/M2/M3），解压后执行：
+            **macOS**: 解压对应架构的 zip，执行：
             ```
             chmod +x BuddyTool
             ./BuddyTool help               # 查看帮助
             ./BuddyTool info               # 展示当前信息
             ```
 
-            **Linux CLI**:
+            **Linux**:
             ```
+            tar -xzf buddy-tool-linux-amd64.tar.gz
             chmod +x buddy-tool
             ./buddy-tool help              # 查看帮助
             ./buddy-tool info              # 展示当前信息
@@ -311,9 +162,9 @@ jobs:
             ### 版本号
             ${{ steps.version.outputs.version }}
           files: |
-            artifacts/windows-build/BuddyTool.exe
-            artifacts/macos-intel-build/BuddyTool-Intel.zip
-            artifacts/macos-arm-build/BuddyTool-ARM.zip
-            artifacts/linux-cli-build/buddy-tool
+            artifacts/windows-build/BuddyTool-windows-amd64.zip
+            artifacts/macos-intel-build/BuddyTool-darwin-amd64.zip
+            artifacts/macos-arm-build/BuddyTool-darwin-arm64.zip
+            artifacts/linux-cli-build/buddy-tool-linux-amd64.tar.gz
           draft: false
           prerelease: false

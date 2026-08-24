@@ -1,33 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-*.egg
-
-# Virtual environments
-venv/
-.venv/
-env/
-
-# PyInstaller
-build/
-dist/
-*.spec.bak
+# Go 构建产物
+out/
+*.exe
 
 # 大文件（超过GitHub 100MB限制）
 update.zip
 update/
 *.zip
 *.7z
-*.exe
 *.dmg
 *.msi
 
 # 运行时数据（含敏感信息：API Key、Token、账号信息）
 *.db
-proxy_db.json
 cookies/
 logs/
 *.log
