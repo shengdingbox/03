@@ -182,6 +182,27 @@ CODEBUDDY_MODELS = str(Path.home() / ".codebuddy" / "models.json")
 CONFIG_BACKUP_DIR = str(Path.home() / ".buddytoolnew" / "config_backups")
 
 
+def _format_tags(tags) -> list:
+    """将服务端 tags 转为 WorkBuddy badge 格式。
+
+    输入: [{"color": "#724bff", "text": "高消耗"}, ...] 或 ["字符串"] 或 None
+    输出: ["badge:高消耗:#724bff", ...]
+    """
+    if not tags or not isinstance(tags, list):
+        return []
+    out = []
+    for t in tags:
+        if isinstance(t, dict):
+            text = str(t.get("text", "")).strip()
+            color = str(t.get("color", "")).strip()
+            if not text:
+                continue
+            out.append(f"badge:{text}:{color}" if color else f"badge:{text}")
+        elif isinstance(t, str) and t.strip():
+            out.append(t.strip())
+    return out
+
+
 def build_config_models(api_key: str, server_models: list, upstream_base: str, prefix: str = "") -> list:
     """根据服务端模型列表 + 机器码 + 上游地址生成 models 配置列表。
 
@@ -204,7 +225,7 @@ def build_config_models(api_key: str, server_models: list, upstream_base: str, p
         if prefix:
             model_id = f"{prefix}{model_id}"
             name = f"{prefix}{name}"
-        models.append({
+        entry = {
             "id": model_id,
             "name": name,
             "vendor": m.get("vendor", "Buddy"),
@@ -215,7 +236,11 @@ def build_config_models(api_key: str, server_models: list, upstream_base: str, p
             "supportsToolCall": m.get("supportsToolCall", True),
             "supportsImages": m.get("supportsImages", True),
             "supportsReasoning": m.get("supportsReasoning", True),
-        })
+        }
+        tags = _format_tags(m.get("tags"))
+        if tags:
+            entry["tags"] = tags
+        models.append(entry)
     return models
 
 

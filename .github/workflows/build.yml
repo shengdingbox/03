@@ -59,7 +59,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --include-data-dir=assets=assets --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --windows-icon-from-ico=assets/icons/app.ico --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -109,7 +109,7 @@ jobs:
 
       - name: Build CLI with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --include-data-dir=assets=assets --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Inspect dist output
         run: |
@@ -164,7 +164,7 @@ jobs:
 
       - name: Build CLI with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --include-data-dir=assets=assets --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Inspect dist output
         run: |
@@ -214,7 +214,7 @@ jobs:
 
       - name: Build CLI with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --include-package=charset_normalizer --include-data-dir=assets=assets --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --include-package=charset_normalizer --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
 
       - name: Verify build
         run: |
@@ -284,29 +284,28 @@ jobs:
 
             **Windows**: 下载 `BuddyTool.exe`，在 CMD 或 PowerShell 中运行：
             ```
-            BuddyTool.exe help          # 查看帮助
-            BuddyTool.exe info          # 展示当前信息
-            BuddyTool.exe activate BC_xx # 激活卡密
-            BuddyTool.exe credits       # 查询积分
-            BuddyTool.exe start         # 启动服务
+            BuddyTool.exe help               # 查看帮助
+            BuddyTool.exe info               # 展示当前信息
+            BuddyTool.exe credits            # 查询积分
+            BuddyTool.exe config-workbuddy   # 配置 WorkBuddy models.json
+            BuddyTool.exe restore-config workbuddy  # 还原 WorkBuddy 配置
             ```
 
             **macOS**: 下载 `BuddyTool-Intel.zip`（Intel）或 `BuddyTool-ARM.zip`（M1/M2/M3），解压后执行：
             ```
             chmod +x BuddyTool
-            ./BuddyTool help            # 查看帮助
-            ./BuddyTool info            # 展示当前信息
+            ./BuddyTool help               # 查看帮助
+            ./BuddyTool info               # 展示当前信息
             ```
 
             **Linux CLI**:
             ```
             chmod +x buddy-tool
-            ./buddy-tool help          # 查看帮助
-            ./buddy-tool info          # 展示当前信息
-            ./buddy-tool credits       # 查询积分
-            ./buddy-tool redeem BC_xx  # 卡密充值
-            ./buddy-tool start         # 启动服务
-            ./buddy-tool config        # 展示配置
+            ./buddy-tool help              # 查看帮助
+            ./buddy-tool info              # 展示当前信息
+            ./buddy-tool credits           # 查询积分
+            ./buddy-tool config            # 展示配置
+            ./buddy-tool config-workbuddy  # 配置 WorkBuddy models.json
             ```
 
             ### 版本号

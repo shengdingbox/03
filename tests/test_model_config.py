@@ -29,12 +29,6 @@ from src.utils.model_config import (  # noqa: E402
     _read_existing_models,
     _write_models_json,
 )
-from src.modules.proxy_server import (  # noqa: E402
-    SUPPORTED_MODELS,
-    MODEL_CONTEXT_LENGTHS,
-    MODEL_MAX_OUTPUT_TOKENS,
-    MODEL_SUPPORTS_IMAGES,
-)
 
 
 class TestNewModelsAndImageSupport(unittest.TestCase):
@@ -59,19 +53,6 @@ class TestNewModelsAndImageSupport(unittest.TestCase):
         self.assertEqual(ModelConfig.MODEL_DISPLAY_NAMES.get("kimi-k2.7"), "Kimi-K2.7-Code")
         # 未列出的模型显示名等于 id（默认）
         self.assertEqual(ModelConfig.MODEL_DISPLAY_NAMES.get("glm-5.2", "glm-5.2"), "glm-5.2")
-
-    def test_proxy_server_new_models_registered(self):
-        """新增模型已在 proxy_server 的各注册表中登记。"""
-        for m in ("hy3", "kimi-k2.7"):
-            self.assertIn(m, SUPPORTED_MODELS, f"{m} 未在 SUPPORTED_MODELS 中")
-            self.assertIn(m, MODEL_CONTEXT_LENGTHS, f"{m} 未在 MODEL_CONTEXT_LENGTHS 中")
-            self.assertIn(m, MODEL_MAX_OUTPUT_TOKENS, f"{m} 未在 MODEL_MAX_OUTPUT_TOKENS 中")
-            self.assertIn(m, MODEL_SUPPORTS_IMAGES, f"{m} 未在 MODEL_SUPPORTS_IMAGES 中")
-
-    def test_proxy_server_all_images_true(self):
-        """proxy_server 的 MODEL_SUPPORTS_IMAGES 全部为 True（含原先为 False 的 glm-5.0 等）。"""
-        for m in ("glm-5.0", "glm-5.0-turbo", "glm-4.7", "glm-4.6", "glm-5.1", "glm-5.2"):
-            self.assertTrue(MODEL_SUPPORTS_IMAGES.get(m), f"{m} 应支持图片输入")
 
 
 class TestReadExistingModels(unittest.TestCase):
