@@ -1,17 +1,20 @@
 # BuddyToolNew Go 构建脚本
 #
-#   make build   本机构建
-#   make test    运行测试
-#   make vet     go vet
-#   make cross   交叉编译 4 平台产物到 out/
-#   make clean   清理 out/
+#   make build            本机构建
+#   make test             运行测试
+#   make vet              go vet
+#   make cross            交叉编译 4 平台产物到 out/
+#   make pkg              交叉编译并打包（带版本号文件名，与 CI 一致）
+#   make clean            清理 out/
+#
+# 版本号默认读 VERSION 文件，可覆盖：make pkg VERSION=26.09.21
 
-BINARY   := BuddyTool
-VERSION  := $(shell tr -d '\r\n' < VERSION)
+BINARY   ?= BuddyTool
+VERSION  ?= $(shell tr -d '\r\n' < VERSION)
 LDFLAGS  := -s -w -X buddy.tool/cli/internal/version.injectedVersion=$(VERSION)
 OUT      := out
 
-.PHONY: build test vet cross clean
+.PHONY: build test vet cross pkg clean
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/$(BINARY)$(shell go env GOEXE) .
@@ -34,6 +37,16 @@ cross:
 	@echo "=== linux/amd64 ==="
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/buddy-tool .
 	@echo "=== 产物 ==="
+	@ls -lh $(OUT)
+
+# 打包为发布产物（文件名带版本号，与 .github/workflows/build.yml 一致）
+pkg: cross
+	@echo "=== 打包 $(VERSION) ==="
+	@cd $(OUT) && \
+		zip -q -r BuddyTool-windows-amd64-$(VERSION).zip BuddyTool.exe && \
+		zip -q -r BuddyTool-darwin-amd64-$(VERSION).zip BuddyTool-darwin-amd64 && \
+		zip -q -r BuddyTool-darwin-arm64-$(VERSION).zip BuddyTool-darwin-arm64 && \
+		tar -czf buddy-tool-linux-amd64-$(VERSION).tar.gz buddy-tool
 	@ls -lh $(OUT)
 
 clean:
