@@ -39,14 +39,14 @@ cross:
 	@echo "=== 产物 ==="
 	@ls -lh $(OUT)
 
-# 打包为发布产物（文件名带版本号，与 .github/workflows/build.yml 一致）
+# 打包为发布产物（文件名不带版本号，与 .github/workflows/build.yml 一致）
 pkg: cross
-	@echo "=== 打包 $(VERSION) ==="
+	@echo "=== 打包 ==="
 	@cd $(OUT) && \
-		zip -q -r BuddyTool-windows-amd64-$(VERSION).zip BuddyTool.exe && \
-		zip -q -r BuddyTool-darwin-amd64-$(VERSION).zip BuddyTool-darwin-amd64 && \
-		zip -q -r BuddyTool-darwin-arm64-$(VERSION).zip BuddyTool-darwin-arm64 && \
-		tar -czf buddy-tool-linux-amd64-$(VERSION).tar.gz buddy-tool
+		zip -q -r BuddyTool-windows-amd64.zip BuddyTool.exe && \
+		zip -q -r BuddyTool-darwin-amd64.zip BuddyTool-darwin-amd64 && \
+		zip -q -r BuddyTool-darwin-arm64.zip BuddyTool-darwin-arm64 && \
+		tar -czf buddy-tool-linux-amd64.tar.gz buddy-tool
 	@ls -lh $(OUT)
 
 clean:

@@ -33,7 +33,7 @@ on:
 
 jobs:
   prepare:
-    # 统一版本号：手动输入优先，否则读 VERSION；build/release 共用，避免文件名与 tag 漂移
+    # 统一版本号：手动输入优先，否则读 VERSION；build 注入二进制、release 打 tag，两处共用
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -89,21 +89,19 @@ jobs:
           ls -lh out/
 
       - name: Package
-        env:
-          VER: ${{ needs.prepare.outputs.version }}
         run: |
           cd out
           if [ "${{ matrix.pkg }}" = "zip" ]; then
-            zip -r ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}-$VER.zip ${{ matrix.name }}${{ matrix.ext }}
+            zip -r ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip ${{ matrix.name }}${{ matrix.ext }}
           else
-            tar -czf ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}-$VER.tar.gz ${{ matrix.name }}${{ matrix.ext }}
+            tar -czf ${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz ${{ matrix.name }}${{ matrix.ext }}
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            out/${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ needs.prepare.outputs.version }}.${{ matrix.pkg }}
+            out/${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.pkg }}
 
   release:
     # Tag push alone never publishes. Manual dispatch must explicitly set publish=true.
@@ -144,14 +142,14 @@ jobs:
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x64 | BuddyTool-windows-amd64-${{ needs.prepare.outputs.version }}.zip |
-            | macOS Intel | BuddyTool-darwin-amd64-${{ needs.prepare.outputs.version }}.zip |
-            | macOS ARM (M1/M2/M3) | BuddyTool-darwin-arm64-${{ needs.prepare.outputs.version }}.zip |
-            | Linux amd64 | buddy-tool-linux-amd64-${{ needs.prepare.outputs.version }}.tar.gz |
+            | Windows x64 | BuddyTool-windows-amd64.zip |
+            | macOS Intel | BuddyTool-darwin-amd64.zip |
+            | macOS ARM (M1/M2/M3) | BuddyTool-darwin-arm64.zip |
+            | Linux amd64 | buddy-tool-linux-amd64.tar.gz |
 
             ### 安装与使用（命令行）
 
-            **Windows**: 解压 `BuddyTool-windows-amd64-${{ needs.prepare.outputs.version }}.zip`，在 CMD 或 PowerShell 中运行：
+            **Windows**: 解压 `BuddyTool-windows-amd64.zip`，在 CMD 或 PowerShell 中运行：
             ```
             BuddyTool.exe help               # 查看帮助
             BuddyTool.exe info               # 展示当前信息
@@ -169,7 +167,7 @@ jobs:
 
             **Linux**:
             ```
-            tar -xzf buddy-tool-linux-amd64-${{ needs.prepare.outputs.version }}.tar.gz
+            tar -xzf buddy-tool-linux-amd64.tar.gz
             chmod +x buddy-tool
             ./buddy-tool help              # 查看帮助
             ./buddy-tool info              # 展示当前信息
@@ -181,9 +179,9 @@ jobs:
             ### 版本号
             ${{ needs.prepare.outputs.version }}
           files: |
-            artifacts/windows-build/BuddyTool-windows-amd64-${{ needs.prepare.outputs.version }}.zip
-            artifacts/macos-intel-build/BuddyTool-darwin-amd64-${{ needs.prepare.outputs.version }}.zip
-            artifacts/macos-arm-build/BuddyTool-darwin-arm64-${{ needs.prepare.outputs.version }}.zip
-            artifacts/linux-cli-build/buddy-tool-linux-amd64-${{ needs.prepare.outputs.version }}.tar.gz
+            artifacts/windows-build/BuddyTool-windows-amd64.zip
+            artifacts/macos-intel-build/BuddyTool-darwin-amd64.zip
+            artifacts/macos-arm-build/BuddyTool-darwin-arm64.zip
+            artifacts/linux-cli-build/buddy-tool-linux-amd64.tar.gz
           draft: false
           prerelease: false
