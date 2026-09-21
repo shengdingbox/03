@@ -11,10 +11,18 @@ import (
 	"testing"
 
 	"buddy.tool/cli/internal/httpclient"
+	"buddy.tool/cli/internal/serverapi"
 )
 
 // withServer 起测试节点服务器并指向 ServerListURL。
+//
+// usageFn 为 nil 时 /v1/usage 返回 200（校验通过）。
 func withServer(t *testing.T, creditsFn, modelsFn func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
+	return withUsageServer(t, nil, creditsFn, modelsFn)
+}
+
+// withUsageServer 同上，并可自定义 /v1/usage 行为。
+func withUsageServer(t *testing.T, usageFn, creditsFn, modelsFn func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
 	handler := http.NewServeMux()
@@ -25,6 +33,13 @@ func withServer(t *testing.T, creditsFn, modelsFn func(w http.ResponseWriter, r 
 			{"id":"2","name":"上海节点","url":"%s","sortOrder":1,"region":"上海"}
 		]}`, srv.URL, srv.URL)
 	})
+	if usageFn == nil {
+		usageFn = func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"is_active":true,"balance":100}`)
+		}
+	}
+	handler.HandleFunc("/v1/usage", usageFn)
 	if creditsFn != nil {
 		handler.HandleFunc("/api/user/credits", creditsFn)
 	}
@@ -102,6 +117,99 @@ func TestInteractiveEmptyKeyExits(t *testing.T) {
 	s := &Session{reader: bufio.NewReader(strings.NewReader("\n\n"))}
 	if code := s.interactive(); code != 0 {
 		t.Fatalf("exit=%d", code)
+	}
+}
+
+// TestLoginPageRetriesOn401 校验 401 时提示 Key 不正确并允许重新输入。
+func TestLoginPageRetriesOn401(t *testing.T) {
+	usageFn := func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-good" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"is_active":true,"balance":1}`)
+	}
+	withUsageServer(t, usageFn, nil, nil)
+
+	s := &Session{reader: bufio.NewReader(strings.NewReader("sk-bad\nsk-good\n"))}
+	var ok bool
+	out := captureStdout(func() { ok = s.loginPage() })
+	if !ok {
+		t.Fatal("loginPage should succeed after retry")
+	}
+	if s.SessionKey != "sk-good" {
+		t.Errorf("session key = %q", s.SessionKey)
+	}
+	if !strings.Contains(out, "API Key 不正确，请重新输入") {
+		t.Errorf("missing retry hint: %s", out)
+	}
+}
+
+// TestLoginPageSkipsValidationOnNetworkError 网络异常时不阻塞用户。
+func TestLoginPageSkipsValidationOnNetworkError(t *testing.T) {
+	srv := withUsageServer(t, nil, nil, nil)
+	srv.Close() // 关掉服务，模拟节点不可用
+
+	s := &Session{reader: bufio.NewReader(strings.NewReader("sk-any\n"))}
+	out := captureStdout(func() {
+		if !s.loginPage() {
+			t.Fatal("loginPage should pass through on network error")
+		}
+	})
+	if s.SessionKey != "sk-any" {
+		t.Errorf("session key = %q", s.SessionKey)
+	}
+	if !strings.Contains(out, "跳过校验") {
+		t.Errorf("missing skip hint: %s", out)
+	}
+}
+
+// TestMainMenuExitsAfterConfig 配置成功后直接提示退出，不再回到菜单。
+func TestMainMenuExitsAfterConfig(t *testing.T) {
+	modelsFn := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"object":"list","data":[{"id":"glm-5.2","name":"GLM-5.2"}]}`)
+	}
+	srv := withServer(t, nil, modelsFn)
+	serverapi.ProxyModelsURL = srv.URL + "/api/proxy/models"
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// 选择 "1" 配置 WorkBuddy，随后任意键退出
+	s := &Session{SessionKey: "sk-key", SelectedNodeURL: srv.URL, reader: bufio.NewReader(strings.NewReader("1\nx"))}
+	var exited bool
+	out := captureStdout(func() { exited = s.mainMenu() })
+	if !exited {
+		t.Fatal("mainMenu should return true (exit) after successful config")
+	}
+	if !strings.Contains(out, "✅ 配置成功") {
+		t.Errorf("missing success prompt: %s", out)
+	}
+	if !strings.Contains(out, "任意键退出脚本") {
+		t.Errorf("missing exit prompt: %s", out)
+	}
+	// 菜单只应渲染一次（配置后不再重复输出菜单）
+	if n := strings.Count(out, "BuddyToolNew 菜单"); n != 1 {
+		t.Errorf("menu rendered %d times, want 1:\n%s", n, out)
+	}
+}
+
+// TestMainMenuStaysOnConfigFailure 配置失败（模型列表拉取失败）时保留菜单。
+func TestMainMenuStaysOnConfigFailure(t *testing.T) {
+	srv := withServer(t, nil, nil) // 未注册 /api/proxy/models → 404
+	serverapi.ProxyModelsURL = srv.URL + "/api/proxy/models"
+
+	s := &Session{SessionKey: "sk-key", SelectedNodeURL: srv.URL, reader: bufio.NewReader(strings.NewReader("1\n0\n"))}
+	out := captureStdout(func() {
+		if !s.mainMenu() {
+			t.Fatal("want exit via menu option 0")
+		}
+	})
+	if n := strings.Count(out, "BuddyToolNew 菜单"); n != 2 {
+		t.Errorf("menu rendered %d times, want 2 (config failed, then exit):\n%s", n, out)
 	}
 }
 

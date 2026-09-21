@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
+	"strings"
 	"time"
 
 	"buddy.tool/cli/internal/httpclient"
@@ -72,6 +74,54 @@ func GetCredits(ctx context.Context, userKey string) (map[string]any, error) {
 		return nil, fmt.Errorf("无可用服务端地址: %w", lastErr)
 	}
 	return nil, errors.New("无可用服务端地址")
+}
+
+// ErrInvalidKey 表示服务端明确拒绝该 API Key（HTTP 401）。
+var ErrInvalidKey = errors.New("API Key 不正确")
+
+// ValidateAPIKey 校验 API Key 是否有效。
+//
+// 依次尝试节点列表中的地址（与 GetCredits 相同的 failover 策略），调用
+// {base}/v1/usage 并带上 Bearer 认证。返回 ErrInvalidKey 表示服务端判定
+// Key 无效；返回其他错误表示网络/节点问题（无法判定 Key 的有效性）。
+func ValidateAPIKey(ctx context.Context, apiKey string) error {
+	if apiKey == "" {
+		return errors.New("API Key 为空")
+	}
+
+	servers, err := httpclient.GetServerList(ctx)
+	if err != nil {
+		return err
+	}
+	if len(servers) == 0 {
+		return errors.New("无可用服务端地址")
+	}
+	rand.Shuffle(len(servers), func(i, j int) { servers[i], servers[j] = servers[j], servers[i] })
+
+	var lastErr error
+	for _, base := range servers {
+		url := strings.TrimRight(base, "/") + "/v1/usage"
+		var data map[string]any
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		status, err := httpclient.GetJSONStatus(cctx, client, url, apiKey, &data)
+		cancel()
+
+		if status == http.StatusUnauthorized {
+			return ErrInvalidKey
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if status >= 200 && status < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("服务端返回 HTTP %d", status)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("无可用服务端地址")
 }
 
 // GetProxyModels 获取模型列表。

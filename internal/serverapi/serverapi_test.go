@@ -3,6 +3,7 @@ package serverapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -164,6 +165,76 @@ func TestGetProxyModelsServerError(t *testing.T) {
 	models := GetProxyModels(context.Background())
 	if models != nil {
 		t.Fatalf("want nil on error, got %v", models)
+	}
+}
+
+// newUsageTestServer 起测试服务，仅注册节点列表与 /v1/usage。
+func newUsageTestServer(t *testing.T, usageFn func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	handler := http.NewServeMux()
+	handler.HandleFunc("/api/server_endpoints", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"data":[{"id":"1","name":"节点A","url":"%s","sortOrder":0,"region":"华南"}]}`, srv.URL)
+	})
+	handler.HandleFunc("/v1/usage", usageFn)
+	srv = httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	setupServerList(t, srv)
+	return srv
+}
+
+func TestValidateAPIKeyValid(t *testing.T) {
+	var gotAuth, gotUA string
+	usageFn := func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"is_active":true,"balance":100}`)
+	}
+	newUsageTestServer(t, usageFn)
+
+	if err := ValidateAPIKey(context.Background(), "sk-valid"); err != nil {
+		t.Fatalf("want nil, got %v", err)
+	}
+	if gotAuth != "Bearer sk-valid" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if gotUA != "cc-switch/1.0" {
+		t.Errorf("User-Agent = %q", gotUA)
+	}
+}
+
+func TestValidateAPIKeyUnauthorized(t *testing.T) {
+	usageFn := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+	newUsageTestServer(t, usageFn)
+
+	err := ValidateAPIKey(context.Background(), "sk-bad")
+	if !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("want ErrInvalidKey, got %v", err)
+	}
+}
+
+func TestValidateAPIKeyServerError(t *testing.T) {
+	usageFn := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	newUsageTestServer(t, usageFn)
+
+	err := ValidateAPIKey(context.Background(), "sk-x")
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if errors.Is(err, ErrInvalidKey) {
+		t.Errorf("500 不应判定为 Key 无效: %v", err)
+	}
+}
+
+func TestValidateAPIKeyEmpty(t *testing.T) {
+	if err := ValidateAPIKey(context.Background(), ""); err == nil {
+		t.Fatal("want error for empty key")
 	}
 }
 

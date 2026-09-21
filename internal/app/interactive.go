@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 
 	"buddy.tool/cli/internal/httpclient"
+	"buddy.tool/cli/internal/serverapi"
 )
 
 // interactive 交互式流程：选择节点 → 输入 API Key → 主菜单（对应 Python _interactive）。
@@ -111,13 +113,35 @@ func (s *Session) startPage() bool {
 }
 
 // loginPage API Key 输入页面（对应 Python _login_page）。
+//
+// 输入后立即调用 /v1/usage 校验：401 提示 Key 不正确并重新输入；
+// 网络异常无法判定时放行（避免节点故障把用户挡在门外）。
 func (s *Session) loginPage() bool {
 	printHeader("请输入 API Key")
-	key := s.readLine("API Key (BuddyKey): ")
-	if key == "" {
-		return false
+	for {
+		key := s.readLine("API Key (BuddyKey): ")
+		if key == "" {
+			return false
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+
+		println("正在校验 API Key...")
+		err := serverapi.ValidateAPIKey(context.Background(), key)
+		if errors.Is(err, serverapi.ErrInvalidKey) {
+			println("❌ API Key 不正确，请重新输入")
+			println()
+			continue
+		}
+		if err != nil {
+			printf("⚠️  无法校验 API Key（%s），跳过校验\n", err)
+		} else {
+			println("✅ API Key 有效")
+		}
+		return s.saveExistingKey(key)
 	}
-	return s.saveExistingKey(key)
 }
 
 // mainMenu 主菜单（对应 Python _main_menu）。返回 true 表示退出。
@@ -130,13 +154,14 @@ func (s *Session) mainMenu() bool {
 		println("  [4] 还原配置")
 		println("  [0] 退出")
 		choice := s.readLine("请选择: ")
+		configured := false
 		switch choice {
 		case "1":
-			cmdConfigWorkbuddy(s, nil, context.Background())
+			configured = cmdConfigWorkbuddy(s, nil, context.Background()) == 0
 		case "2":
-			cmdConfigCodebuddy(s, nil, context.Background())
+			configured = cmdConfigCodebuddy(s, nil, context.Background()) == 0
 		case "3":
-			s.configAll()
+			configured = s.configAll()
 		case "4":
 			s.restoreMenu()
 		case "0", "q":
@@ -145,16 +170,30 @@ func (s *Session) mainMenu() bool {
 		default:
 			println("❌ 无效选择")
 		}
+		if configured {
+			s.exitPrompt()
+			return true
+		}
 		println()
 	}
 }
 
 // configAll 同时配置 WorkBuddy 与 CodeBuddy（对应 Python _config_all）。
-func (s *Session) configAll() {
+//
+// 返回 true 表示两个客户端都配置成功。
+func (s *Session) configAll() bool {
 	println("\n--- 配置 WorkBuddy ---")
-	cmdConfigWorkbuddy(s, nil, context.Background())
+	wbOK := cmdConfigWorkbuddy(s, nil, context.Background()) == 0
 	println("\n--- 配置 CodeBuddy ---")
-	cmdConfigCodebuddy(s, nil, context.Background())
+	cbOK := cmdConfigCodebuddy(s, nil, context.Background()) == 0
+	return wbOK && cbOK
+}
+
+// exitPrompt 配置完成后的收尾提示，任意键退出。
+func (s *Session) exitPrompt() {
+	println("\n✅ 配置成功")
+	println("任意键退出脚本")
+	_, _ = s.reader.ReadByte()
 }
 
 // restoreMenu 还原配置子菜单（对应 Python _restore_menu）。
